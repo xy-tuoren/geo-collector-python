@@ -1,0 +1,81 @@
+# Geo Collector 安装与首次使用
+
+## 推荐：安装 CLI 和配套 Skill
+
+其他用户需要：本地 Agent（能执行终端命令、读文件和看截图）、[uv](https://docs.astral.sh/uv/getting-started/installation/)、安卓手机。CLI 与配套 Skill 打包在同一个 wheel 中，不需要下载源码，也不需要额外模型或 API Key。
+
+**当前尚未发布到 PyPI，也没有公开下载地址。** 先由维护者提供 `geo_collector-0.1.2-py3-none-any.whl`，用户下载后，在文件所在目录执行以下两条命令。uv 会为工具准备 Python 3.11 和依赖；第二条将 Skill 安装到所选 Agent 的用户目录。
+
+```sh
+uv tool install --python 3.11 ./geo_collector-0.1.2-py3-none-any.whl
+geo-collect setup --agent codex
+```
+
+Claude Code 用户把 `codex` 换成 `claude-code`，Cursor 用户换成 `cursor`。如果 uv 提示工具目录不在 PATH，先执行 `uv tool update-shell` 并重新打开终端或本地 Agent，再运行第二条命令。
+
+在支持 `&&` 的终端中（例如 macOS/Linux shell、Windows CMD 或 PowerShell 7），可合并为一行；Windows PowerShell 5 使用上面的两行方式。
+
+```sh
+uv tool install --python 3.11 ./geo_collector-0.1.2-py3-none-any.whl && geo-collect setup --agent codex
+```
+
+装好后，在计划保存数据的目录重新打开 Agent 会话，连接并授权安卓手机，然后直接发送：
+
+> 使用 geo-collector 采集这些问题，入口为小荷 App、抖音搜索、头条搜索和抖音小程序直问：[问题列表]。先检查手机连接，遇到异常自行检查、修复并恢复原批次，验收后给我交付图片和逐题结果。
+
+用户无需手动创建 Skill 或填写修复 JSON。需要登录、解锁或授权 USB 调试时，Agent 会在当前对话中请求协助。Skill 提供采集、自愈和验收流程，必须由正在运行的本地 Agent 读取和执行。
+
+`setup` 默认安装到当前用户；`--scope project` 仅安装到当前目录。`--dry-run` 可查看目标而不写文件。Codex 使用 `.agents/skills/geo-collector/SKILL.md`，Claude Code 使用 `.claude/skills/geo-collector/SKILL.md`，Cursor 使用 `.cursor/skills/geo-collector/SKILL.md`；用户范围位于用户主目录，项目范围位于当前目录。Claude Code 用户范围也尊重 `CLAUDE_CONFIG_DIR`。安装输出包含具体路径。升级 CLI 后再次执行相同的 `setup` 即更新 Skill；用户改过的同名 Skill 会被保留并报告冲突，符号链接部署应通过原 Skill 管理工具更新。
+
+**维护者发布到 PyPI 后**，用户才能把安装命令中的 wheel 路径换成 `geo-collector==0.1.2`。如果选择文件托管，也可换成真实可信的 wheel 下载地址。发布前，按包名安装不是这个项目的可用交付方式。
+
+## ZIP 安装方式
+
+选择 ZIP 时，把包解压到自己有写权限的目录。首次安装需要联网下载 Python 和锁定的依赖。下文的 `geo-collect` 命令，在解压目录中用 `uv run --locked --no-dev geo-collect` 调用。
+
+### Windows x64
+
+1. 双击 `install-windows.cmd`。已有 `uv` 和 `adb` 时直接复用，缺少时安装器使用 Windows 的 WinGet 安装它们，然后在解压目录创建 `.venv`。看到 `Geo Collector installed` 后，打开一个新终端或重新打开本地 Agent。
+2. 如果电脑没有 WinGet，先安装 Microsoft 的 [App Installer](https://learn.microsoft.com/windows/package-manager/winget/)。也可以按 [uv 安装说明](https://docs.astral.sh/uv/getting-started/installation/)和 [Android Platform-Tools 下载页](https://developer.android.com/tools/releases/platform-tools)手动安装，确认新终端能运行 `uv --version` 和 `adb version` 后再双击安装器。
+3. 如果安装器在导入 `onnxruntime` 时报告缺少运行库，用 WinGet 安装 `Microsoft.VCRedist.2015+.x64` 或使用 [Microsoft Visual C++ 运行库安装程序](https://learn.microsoft.com/cpp/windows/latest-supported-vc-redist)，再重试。
+
+Windows 的异常接管由本地对话 Agent 执行。独立的 `--agent codex` 和 `supervise` 模式目前支持 macOS 和 Linux。
+
+### Linux 和 macOS
+
+先安装 [uv](https://docs.astral.sh/uv/getting-started/installation/)和 [ADB](https://developer.android.com/tools/releases/platform-tools)。在 Ubuntu 可使用系统的 `adb` 与 `android-sdk-platform-tools-common`（USB 设备规则），在 macOS 可用 Homebrew 安装 `uv` 与 `android-platform-tools`。如果 Linux 导入 OpenCV 时报告缺少 `libGL.so.1`，在 Ubuntu 安装 `libgl1` 再重试。
+
+在解压目录执行以下命令。
+
+```sh
+uv sync --locked --no-dev
+uv run --locked --no-dev geo-collect entries
+```
+
+## 连接手机并完成首测
+
+1. 在安卓手机上安装要采集的 App。分别是小荷 AI 医生、抖音和今日头条，抖音小程序入口使用同一个抖音 App。
+2. 开启开发者选项中的 USB 调试，用支持数据传输的线连接手机。解锁手机，在手机上允许这台电脑调试，并保持竖屏。
+3. 在计划保存采集数据的工作目录运行 `geo-collect doctor`，检查连接、截图、页面结构和 OCR。ZIP 安装者从解压目录调用。
+
+CLI 优先使用指定的或系统已有的 ADB。Windows x64 和 Linux x64 的 `adbutils` 依赖自带 ADB，CLI 可以在系统 ADB 缺失时使用。其他平台如果自检提示找不到 ADB，请安装 [Android Platform-Tools](https://developer.android.com/tools/releases/platform-tools)。
+
+ADB 显示 `unauthorized` 时，先在手机上确认授权。Windows 上看不到设备时，可参考 [安卓 USB 驱动说明](https://developer.android.com/studio/run/oem-usb)安装手机厂商的驱动。Ubuntu 提示 `no permissions` 时，检查 `android-sdk-platform-tools-common` 和当前用户的 `plugdev` 组权限。全局安装者也可使用上述 Visual C++ 或 OpenCV 缺少运行库的排查方式。
+
+## 发给本地 Agent 的采集任务
+
+把用于存放采集数据的目录作为本地 Agent 工作区，确保 Agent 可以执行终端命令并查看本机文件和截图。全局安装的用户可以直接把这段话发给 Agent。
+
+完成 `setup` 的用户使用前面的采集任务即可。其他支持终端和图片的 Agent，或尚未发现 Skill 的会话，可以用下面的兜底方式加载同一份说明：
+
+> 请先运行 `geo-collect agent-guide`，然后按说明采集我给的问题。入口是小荷 App、抖音搜索、头条搜索和抖音小程序直问。遇到异常请检查现场、修复并继续原批次，最终验收后给我交付图片目录和逐题结果。
+
+在终端使用时，把题目写在 UTF-8 的 `captures/questions.txt` 中，每行一题，再运行以下命令。
+
+```sh
+geo-collect run --entry xiaohe douyin toutiao douyin-direct --questions-file captures/questions.txt
+```
+
+交付图片保存在 `captures/` 下的批次目录中。终端运行遇到新页面时会保存断点，退出码 `20` 代表需要 Agent 接管。用户可以把批次目录告诉同一个工作区的本地 Agent，由它查看现场并继续原批次。
+
+每位用户的题库、截图、断点及学到的规则留在自己的工作目录。全局安装更新时，用相同的安装命令指定新版本，再运行 `geo-collect setup --agent <所用 Agent>` 更新配套 Skill，并沿用原工作目录。ZIP 安装跨目录升级时可复制自己的 `.geo-collector/` 来复用已验证规则。已有暂停批次从原目录恢复。

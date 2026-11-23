@@ -1,0 +1,39 @@
+[project]
+name = "geo-collector"
+version = "0.1.2"
+description = "Python Android capture CLI with verified reusable Agent repairs"
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+# Tool installations resolve these independently of uv.lock.
+dependencies = [
+    "uiautomator2==3.7.0",
+    "adbutils==2.12.0",
+    "pillow==12.3.0",
+    "numpy==2.4.6; python_version < '3.12'",
+    "numpy==2.5.3; python_version >= '3.12'",
+    "rapidocr==3.9.2",
+    "onnxruntime==1.30.0",
+    "opencv-python==4.14.0.94",
+]
+
+[project.scripts]
+geo-collect = "geo_collector.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/geo_collector"]
+
+[tool.hatch.build.targets.wheel.force-include]
+".agents/skills/geo-collector/SKILL.md" = "geo_collector/agent_guide.md"
+
+[tool.hatch.build.targets.sdist]
+include = ["/src", "/README.md", "/INSTALL.md", "/.agents/skills/geo-collector/SKILL.md"]
+
+[dependency-groups]
+dev = ["pytest>=8,<10"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
