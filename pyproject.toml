@@ -1,6 +1,6 @@
 [project]
 name = "xiaohe-geo-collector"
-version = "0.1.3"
+version = "0.1.4"
 description = "Python Android capture CLI with verified reusable Agent repairs"
 readme = "README.md"
 requires-python = ">=3.11,<3.13"
