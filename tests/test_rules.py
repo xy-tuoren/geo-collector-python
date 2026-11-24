@@ -89,3 +89,70 @@ def test_anchored_swipe_rejects_invalid_screen_distance(distance):
 def test_swipe_targets_receive_the_same_anchor_validation_as_taps(target):
     with pytest.raises(ValueError):
         validate_recipe({"actions": [{"type": "swipe", "direction": "down", "target": target}]})
+
+
+def test_obfuscated_id_and_full_width_container_fall_back_to_unique_visual_template(tmp_path):
+    from PIL import ImageDraw
+    from geo_collector.rules import generalize_region, is_obfuscated_id
+
+    assert is_obfuscated_id("com.ss.android.ugc.aweme:id/sgk")
+    assert is_obfuscated_id("com.ss.android.ugc.aweme:id/2vk")
+    assert is_obfuscated_id("com.ss.android.ugc.aweme:id/nl=")
+    assert not is_obfuscated_id("com.ss.android.ugc.aweme:id/et_search_kw")
+    assert not is_obfuscated_id("android:id/content")
+
+    image = Image.new("RGB", (1080, 2400), "white")
+    draw = ImageDraw.Draw(image)
+    # Draw a unique speech-bubble-plus icon at (629, 165) inside a full-width R8 toolbar.
+    draw.rounded_rectangle((604, 140, 654, 186), radius=8, outline="black", width=4)
+    draw.line((629, 151, 629, 175), fill="black", width=4)
+    draw.line((617, 163, 641, 163), fill="black", width=4)
+    stream = BytesIO()
+    image.save(stream, format="PNG")
+    scene = Observation(
+        stream.getvalue(), "<hierarchy/>", "com.ss.android.ugc.aweme", "MiniAppHostActivity0",
+        (1080, 2400), (1080, 2400), "40.4.0",
+        nodes=[
+            {"package": "com.ss.android.ugc.aweme", "resource_id": "com.ss.android.ugc.aweme:id/sgk",
+             "text": "", "description": "", "bounds": [0, 0, 1080, 237]},
+            {"package": "com.ss.android.ugc.aweme", "resource_id": "",
+             "text": "", "description": "", "bounds": [0, 96, 825, 234]},
+        ],
+        texts=[],
+    )
+    preview_target = infer_target(scene, (629, 165), tmp_path / "assets", save_assets=False)
+    assert preview_target["kind"] == "template"
+    assert not (tmp_path / "assets").exists()
+
+    saved_target = infer_target(scene, (629, 165), tmp_path / "assets", save_assets=True)
+    assert saved_target["kind"] == "template"
+    assert locate(saved_target, scene, tmp_path / "assets") == pytest.approx((629, 165), abs=2)
+
+    # A second identical icon in the search region makes the visual patch ambiguous.
+    draw.rounded_rectangle((704, 140, 754, 186), radius=8, outline="black", width=4)
+    draw.line((729, 151, 729, 175), fill="black", width=4)
+    draw.line((717, 163, 741, 163), fill="black", width=4)
+    dup_stream = BytesIO()
+    image.save(dup_stream, format="PNG")
+    dup_scene = Observation(dup_stream.getvalue(), scene.xml, scene.package, scene.activity,
+                            scene.logical_size, scene.physical_size, scene.version, scene.nodes, [])
+    with pytest.raises(ValueError, match="不唯一"):
+        infer_target(dup_scene, (629, 165), tmp_path / "dup", save_assets=False)
+
+    # Region generalization drops region for unique stable IDs and widens header OCR safely.
+    obs_dict = {
+        "package": "app.demo", "logical_size": [1080, 2400], "physical_size": [1080, 2400],
+        "nodes": [{"package": "app.demo", "resource_id": "app.demo:id/search_btn", "bounds": [920, 80, 1040, 160]}],
+        "texts": [{"text": "新会话", "confidence": .99, "bounds": [600, 100, 720, 160]},
+                  {"text": "查看全文", "confidence": .99, "bounds": [80, 600, 260, 650]},
+                  {"text": "查看全文", "confidence": .99, "bounds": [80, 1400, 260, 1450]}],
+    }
+    widened_id = generalize_region({"kind": "node", "attr": "resource_id", "value": "app.demo:id/search_btn",
+                                    "region": [.84, .03, .97, .07]}, obs_dict, (920, 80, 1040, 160))
+    assert "region" not in widened_id
+    widened_ocr = generalize_region({"kind": "ocr", "pattern": "^新会话$", "region": [.55, .04, .67, .07]},
+                                    obs_dict, (600, 100, 720, 160))
+    assert widened_ocr["region"] == [0, 0, 1, .22]
+    disambiguated = generalize_region({"kind": "ocr", "pattern": "^查看全文$", "region": [.07, .24, .25, .28]},
+                                      obs_dict, (80, 600, 260, 650))
+    assert disambiguated["region"][3] < .58

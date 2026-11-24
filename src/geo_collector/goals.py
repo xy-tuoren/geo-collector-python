@@ -31,15 +31,31 @@ SESSION_EVIDENCE = ["当前小荷小程序、单次新会话确认和最新会�
 SESSION_HINTS = ["已开始新会话", "AI医生", "你可以这样问我", "系统欢迎卡"]
 
 CAPTURE_OBJECTIVES = {
+    "xiaohe.new_session": ("进入没有旧回答的小荷新会话首页", ["小荷前台应用", "唯一空输入框且正文视口无历史问答残留"]),
+    "douyin.open_search": ("打开抖音搜索输入页", ["抖音前台应用", "唯一可回读搜索输入框"]),
+    "douyin.open_xiaohe": ("打开首屏小荷AI医生卡片入口", ["同卡片包含小荷AI医生品牌与入口按钮", "进入后确认小程序回答页"]),
+    "toutiao.open_search": ("打开头条搜索输入页", ["头条前台应用", "顶部可输入搜索框"]),
+    "toutiao.open_xiaohe": ("打开头条首屏小荷总结全文或小程序", ["同区域包含小荷AI医生品牌与查看全文或小程序入口", "进入后确认小荷回答页"]),
+    "douyin-direct.open_search": ("打开抖音搜索页准备查找小荷小程序", ["抖音前台应用", "唯一搜索输入框"]),
+    "douyin-direct.open_miniapp": ("从名称搜索结果进入唯一的小荷AI医生小程序", ["同卡片包含小荷AI医生、小程序标记与进入入口", "进入后确认小程序首页或对话页"]),
+    "douyin-direct.open_chat": ("从小荷小程序首页进入对话输入页", ["可见小荷AI医生品牌与底部对话输入区"]),
+    "douyin-direct.new_session": ("点击开启新会话控件打开确认弹窗", ["出现开启新会话及结束当前咨询确认弹窗"]),
+    "douyin-direct.confirm_session": ("单次确认开启新会话", ["确认弹窗消失且回到小荷小程序对话页"]),
+    "douyin-direct.text_mode": ("切换到底部文字输入模式", ["底部出现唯一可聚焦文字输入框"]),
     "douyin-direct.close_products": ("离开上一题药品列表", ["没有药品抽屉", "已确认小荷首页或对话页"]),
     "douyin-direct.return_to_chat": ("从小荷首页返回对话", ["小荷品牌和唯一对话输入区", "没有药品抽屉"]),
     SESSION_STEP: ("证明本次新会话还没有用户提问", SESSION_EVIDENCE),
     BEFORE_SEND: ("核对发送前的原题与新会话", [*SESSION_EVIDENCE, "唯一输入框完整回读本题、已确认本次尚未发送"]),
+    "overlay.dismiss": ("关闭遮挡回答视口的引导浮层", ["引导提示消失", "真实正文视口与底部输入栏恢复可见"]),
+    "network.retry": ("点击重试恢复当前回答加载", ["网络异常提示消失", "真实回答正文可见"]),
+    "capture.close_existing_products": ("采集正文前关闭遗留的药品抽屉", ["药品抽屉消失", "正文视口可验证"]),
     "capture.answer_page": ("恢复本题回答页", ["正确平台及回答页面", "可验证的完整正文视口"]),
     "capture.generation": ("确认本题回答已生成完毕", ["真实回答正文", "生成结束证据；页面静止本身不足以验收"]),
     "capture.question_top": ("取得实际回答首屏", ["完整原题，或原题已核对的搜索入口截图", "回答从真实顶部开始；App不展示原题时不要求问题气泡"]),
     "citation.expand": ("保留完整展开的引用资料", ["本题引用标题", "独立可见的真实资料行"]),
     "capture.body": ("连续采集实际回答到末尾", ["原始PNG像素接缝", "没有遗漏或遮挡", "真实末尾或App明确的下载/打开限制提示"]),
+    " products.open".strip(): ("打开完整参考药品抽屉列表", ["出现参考/推荐药品标题与可滚动列表", "确认列表首项药品"]),
+    "products.expand": ("将参考药品抽屉向上展开至全屏", ["面板顶部到达全屏位置且保留初始首项药品"]),
     "capture.products": ("完整保留参考药品", ["真实首项", "所有图文及图片就绪", "连续像素接缝与真实末项"]),
     "capture.delivery": ("交付通过验收的截图", ["搜索智能回答及点击后的完整可见回答；存在时展开信源和参考药品", "可解码且属于本题的正式PNG"]),
 }
@@ -157,20 +173,58 @@ def role_labels(observation, role):
 
 
 def page_guard(observation):
-    """Persist structure, not dynamic health text or screenshot coordinates."""
-    from .rules import UI_LABELS
-    anchors = []
+    """Persist app-scoped structure, not SystemUI status icons or R8 obfuscated IDs."""
+    from .rules import UI_LABELS, is_obfuscated_id
+    primary, fallback = [], []
     for node in observation.nodes:
-        if node.get("resource_id"):
-            target = {"kind": "node", "attr": "resource_id", "value": node["resource_id"]}
-        elif (node.get("text") or node.get("description")) in UI_LABELS:
+        if node.get("package", "") not in ("", observation.package):
+            continue
+        rid = node.get("resource_id")
+        label = node.get("text") or node.get("description")
+        if rid and not is_obfuscated_id(rid):
+            target = {"kind": "node", "attr": "resource_id", "value": rid}
+            bucket = fallback if rid == "android:id/content" else primary
+        elif label in UI_LABELS:
             attr = "text" if node.get("text") else "description"
             target = {"kind": "node", "attr": attr, "value": node[attr]}
+            bucket = primary
         else:
             continue
-        if target not in anchors:
-            anchors.append(target)
-    return {"activity": observation.activity, "anchors": anchors[:8]}
+        if target not in primary and target not in fallback:
+            bucket.append(target)
+    return {"activity": observation.activity, "anchors": (primary + fallback)[:8]}
+
+
+_TRANSIENT_RETRY = re.compile(r"^(?:\^)?(?:点击|请|重新|刷新)?重试(?:\$)?$|^(?:\^)?(?:重新加载|刷新|重新连接|再试一次)(?:\$)?$")
+
+
+def _is_transient_retry_hop(hop):
+    if hop.get("before", {}).get("activity") != hop.get("after", {}).get("activity"):
+        return False
+    action = hop.get("action", {})
+    if action.get("type") != "tap":
+        return False
+    target = action.get("target", {})
+    text = str(target.get("value") or target.get("pattern") or "").strip()
+    return bool(text and _TRANSIENT_RETRY.fullmatch(text))
+
+
+def prune_route(route):
+    """Eliminate state self-loops and transient retry hops before persisting a route."""
+    if not route:
+        return []
+    filtered = [hop for index, hop in enumerate(route)
+                if not (len(route) > 1 and index < len(route) - 1 and _is_transient_retry_hop(hop))
+                and not (len(route) > 1 and hop["before"].get("anchors") and hop["before"] == hop["after"])]
+    pruned = []
+    for hop in (filtered or route):
+        if hop["before"].get("anchors"):
+            for index, prior in enumerate(pruned):
+                if prior["before"] == hop["before"]:
+                    pruned = pruned[:index]
+                    break
+        pruned.append(hop)
+    return pruned or list(route[-1:])
 
 
 def guard_matches(guard, observation):

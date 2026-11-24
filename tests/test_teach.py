@@ -303,3 +303,52 @@ def test_rules_command_reports_health(tmp_path, capsys):
     assert report == [{"step": f"{PACKAGE}:open", "revision": 1, "active": True, "source": "agent", "kind": "actions",
                        "app_version": "1", "verified_versions": ["1"], "activity": "MainActivity", "successes": 0,
                        "failures": 1, "last_error": "一次失败", "invalidated_version": None}]
+
+
+def test_teach_point_transient_and_lynx_semantic_summary(tmp_path, monkeypatch):
+    from geo_collector.teach import summarize, teach as run_teach
+
+    monkeypatch.setattr("geo_collector.recovery.time.sleep", lambda _: None)
+    monkeypatch.setattr("geo_collector.teach.time.sleep", lambda _: None)
+
+    page = observation()
+    page.nodes.extend([
+        {"package": "com.android.systemui", "resource_id": "com.android.systemui:id/clock",
+         "text": "20:00", "bounds": [5, 2, 45, 18], "clickable": True},
+        {"package": PACKAGE, "resource_id": "", "text": "", "description": "进入按钮",
+         "class_name": "com.lynx.tasm.behavior.ui.LynxFlattenUI", "bounds": [120, 100, 170, 140], "clickable": False},
+        {"package": PACKAGE, "resource_id": "", "text": "重试", "description": "",
+         "class_name": "android.widget.TextView", "bounds": [60, 180, 120, 220], "clickable": True},
+    ])
+    summary = summarize(page)
+    assert any(c["description"] == "进入按钮" for c in summary["controls"])
+    assert all("systemui" not in c["resource_id"] for c in summary["controls"])
+
+    class TransientThenPointPhone(FakeDevice):
+        serial = "phone-1"
+
+        def tap(self, point, **kwargs):
+            self.actions.append(tuple(point))
+            if point == (90.0, 200.0):
+                self.current = replace(page, nodes=[n for n in page.nodes if n.get("text") != "重试"])
+            else:
+                self.current = observation(ready=True)
+
+    store, phone, run_dir = RuleStore(tmp_path / "rules"), TransientThenPointPhone(page), tmp_path / "run"
+    state = run_state(serial="phone-1")
+    request_file = stop(StepEngine(phone, store, run_dir, state))
+
+    args_transient = cli.parser().parse_args(["teach", str(run_dir), "tap", "--node", "text=重试", "--transient"])
+    first = run_teach(phone, store, run_dir, args_transient)
+    assert first["transient"] is True and first["recorded"] is False and first["route_steps"] == 0
+    assert read_json(request_file)["status"] == "transient"
+    assert "exploration" not in read_json(run_dir / "调试产物/run.json")
+
+    # Stop again on the recovered page and teach via --point on a whitelisted UI_LABELS control ("搜索").
+    phone.current.nodes.append({"package": PACKAGE, "text": "搜索", "resource_id": "app:id/go",
+                                "bounds": [120, 100, 170, 140], "clickable": True})
+    stop(StepEngine(phone, store, run_dir, read_json(run_dir / "调试产物/run.json")))
+    args_point = cli.parser().parse_args(["teach", str(run_dir), "tap", "--point", "145", "120"])
+    second = run_teach(phone, store, run_dir, args_point)
+    assert second["recorded"] is True and second["route_steps"] == 1
+    assert second["action"]["target"]["value"] == "app:id/go"

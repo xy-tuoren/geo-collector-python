@@ -4,8 +4,8 @@ import hashlib
 import re
 
 from .images import stable
-from .recovery import load_observation, unchanged_control
-from .rules import in_region
+from .recovery import check_exploration, load_observation, unchanged_control
+from .rules import LocateError, in_region, infer_target, locate, present
 from .teach import TeachSession
 from .supervisor import CodexAgent, decision_plan, supervise
 
@@ -64,6 +64,66 @@ def apply_decision(session, decision, context):
         if preview['scene_check'] == 'rejected' or (preview['scene_check'] == 'failed' and {'session_welcome', 'session_divider'}.intersection(plan['perception'])):
             raise OfflineRejection('、'.join(preview['missing_evidence'])[:240])
 
+    if "interrupt" in plan:
+        from .repair_preview import OfflineRejection
+        detail = plan["interrupt"]
+        if not present(detail["detect"], original):
+            raise OfflineRejection("原始现场未检测到指定中断目标")
+        dismiss_action = detail["actions"][0]
+        if "target" in dismiss_action:
+            try:
+                pt = locate(dismiss_action["target"], original, session.store.assets)
+                check_exploration(dismiss_action, pt, original, session.state)
+            except (ValueError, LocateError) as error:
+                raise OfflineRejection(str(error)[:240]) from error
+
+        def validate_interrupt(current):
+            if (original.package != current.package or original.activity != current.activity
+                    or original.logical_size != current.logical_size or original.physical_size != current.physical_size):
+                raise ValueError("AI 思考期间页面或设备尺寸已变化，未执行中断关闭")
+            if not present(detail["detect"], current):
+                raise ValueError("中断目标已消失，无需重复操作")
+            check_plan = {"actions": detail["actions"]}
+            target = dismiss_action.get("target")
+            if target is not None and not _same_target(original, current, target):
+                raise ValueError("AI 思考期间关闭控件已变化，未执行中断关闭")
+            if not (stable(original.png, current.png)
+                    or unchanged_control(original, current, check_plan, session.store.assets)):
+                raise ValueError("AI 思考期间中断页面已变化，未执行中断关闭")
+
+        return session.interrupt(detail["name"], detail["detect"], detail["actions"], validate_observation=validate_interrupt)
+
+    if "point_template" in plan:
+        from .repair_preview import OfflineRejection
+        nx, ny = plan["point_template"]["normalized_point"]
+        pw, ph = original.physical_size
+        lw, lh = original.logical_size
+        phys_point = (nx * pw, ny * ph)
+        logical_point = (nx * lw, ny * lh)
+        hints = (request or {}).get("hints", ())
+        try:
+            inferred = infer_target(original, phys_point, session.store.assets, hints, save_assets=False)
+            check_exploration({"type": "tap", "target": inferred}, logical_point, original, session.state)
+        except (ValueError, LocateError) as error:
+            raise OfflineRejection(str(error)[:240]) from error
+
+        def validate_point(current):
+            if (original.package != current.package or original.activity != current.activity
+                    or original.logical_size != current.logical_size or original.physical_size != current.physical_size):
+                raise ValueError("AI 思考期间页面或设备尺寸已变化，未执行视觉模板点击")
+            if inferred["kind"] == "template":
+                if not stable(original.png, current.png):
+                    raise ValueError("AI 思考期间页面画面已变化，未保存或点击视觉模板")
+                infer_target(original, phys_point, session.store.assets, hints, save_assets=True)
+            else:
+                if not _same_target(original, current, inferred):
+                    raise ValueError("AI 思考期间目标控件已变化，未执行动作")
+                if not (stable(original.png, current.png)
+                        or unchanged_control(original, current, {"actions": [{"type": "tap", "target": inferred}]}, session.store.assets)):
+                    raise ValueError("AI 思考期间目标控件或页面已变化，未执行动作")
+
+        return session.act({"type": "tap", "target": inferred}, validate_observation=validate_point)
+
     def validate(current):
         if (original.package != current.package or original.activity != current.activity
                 or original.logical_size != current.logical_size or original.physical_size != current.physical_size):
@@ -84,7 +144,7 @@ def apply_decision(session, decision, context):
     if "perception" in plan:
         role, target = next(iter(plan["perception"].items()))
         return session.perception(role, target, validate_observation=validate)
-    return session.act(plan["actions"][0], validate_observation=validate)
+    return session.act(plan["actions"][0], validate_observation=validate, transient=bool(plan.get("transient")))
 
 
 def supervise_collection(device, store, directory, state, *, resume, limits, agent=None, retry_failed=False):

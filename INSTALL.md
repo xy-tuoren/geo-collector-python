@@ -1,22 +1,40 @@
 # Geo Collector 安装与首次使用
 
-## 推荐：安装 CLI 和配套 Skill
+## 推荐：通过 PyPI 安装 CLI 和配套 Skill
 
 其他用户需要：本地 Agent（能执行终端命令、读文件和看截图）、[uv](https://docs.astral.sh/uv/getting-started/installation/)、安卓手机。CLI 与配套 Skill 打包在同一个 wheel 中，不需要下载源码，也不需要额外模型或 API Key。
 
-**当前尚未发布到 PyPI，也没有公开下载地址。** 先由维护者提供 `geo_collector-0.1.2-py3-none-any.whl`，用户下载后，在文件所在目录执行以下两条命令。uv 会为工具准备 Python 3.11 和依赖；第二条将 Skill 安装到所选 Agent 的用户目录。
+### 1. 首次安装（PyPI 发布后）
+
+uv 会自动准备 Python 3.11 和依赖；第二条将 Skill 安装到所选 Agent 的用户目录：
 
 ```sh
-uv tool install --python 3.11 ./geo_collector-0.1.2-py3-none-any.whl
-geo-collect setup --agent codex
+# 国际网络
+uv tool install --python 3.11 xiaohe-geo-collector && geo-collect setup --agent codex
+
+# 国内网络推荐加清华镜像（首次下载 onnxruntime/opencv 更快）
+uv tool install --python 3.11 --default-index https://pypi.tuna.tsinghua.edu.cn/simple xiaohe-geo-collector && geo-collect setup --agent codex
 ```
 
-Claude Code 用户把 `codex` 换成 `claude-code`，Cursor 用户换成 `cursor`。如果 uv 提示工具目录不在 PATH，先执行 `uv tool update-shell` 并重新打开终端或本地 Agent，再运行第二条命令。
+Claude Code 用户把 `codex` 换成 `claude-code`，Cursor 用户换成 `cursor`。Windows PowerShell 5 不支持 `&&`，请拆成两行分别执行。如果 uv 提示工具目录不在 PATH，先执行 `uv tool update-shell` 并重新打开终端或本地 Agent，再运行 `geo-collect setup`。
 
-在支持 `&&` 的终端中（例如 macOS/Linux shell、Windows CMD 或 PowerShell 7），可合并为一行；Windows PowerShell 5 使用上面的两行方式。
+> 若维护者尚未发布首个 PyPI 版本，或处于离线/内网环境，也可直接把包名替换成 GitHub Release 提供的 wheel 路径或下载地址（如 `./xiaohe_geo_collector-0.1.2-py3-none-any.whl`）。
+
+### 2. 一键更新（同时升级 CLI 与配套 Skill）
+
+维护者发布新版本后，已安装用户只需一条命令即可升级 CLI，并自动刷新本机所有已安装的受管 Agent Skill（不影响各自工作目录里的 `.geo-collector/rules.json`、`lessons.json` 和 `captures/`）：
 
 ```sh
-uv tool install --python 3.11 ./geo_collector-0.1.2-py3-none-any.whl && geo-collect setup --agent codex
+geo-collect upgrade
+
+# 国内网络使用清华或阿里镜像加速
+geo-collect upgrade --mirror tuna
+```
+
+也可以手动分步执行：
+
+```sh
+uv tool upgrade xiaohe-geo-collector && geo-collect setup --installed
 ```
 
 装好后，在计划保存数据的目录重新打开 Agent 会话，连接并授权安卓手机，然后直接发送：
@@ -25,9 +43,27 @@ uv tool install --python 3.11 ./geo_collector-0.1.2-py3-none-any.whl && geo-coll
 
 用户无需手动创建 Skill 或填写修复 JSON。需要登录、解锁或授权 USB 调试时，Agent 会在当前对话中请求协助。Skill 提供采集、自愈和验收流程，必须由正在运行的本地 Agent 读取和执行。
 
-`setup` 默认安装到当前用户；`--scope project` 仅安装到当前目录。`--dry-run` 可查看目标而不写文件。Codex 使用 `.agents/skills/geo-collector/SKILL.md`，Claude Code 使用 `.claude/skills/geo-collector/SKILL.md`，Cursor 使用 `.cursor/skills/geo-collector/SKILL.md`；用户范围位于用户主目录，项目范围位于当前目录。Claude Code 用户范围也尊重 `CLAUDE_CONFIG_DIR`。安装输出包含具体路径。升级 CLI 后再次执行相同的 `setup` 即更新 Skill；用户改过的同名 Skill 会被保留并报告冲突，符号链接部署应通过原 Skill 管理工具更新。
+`setup` 默认安装到当前用户；`--scope project` 仅安装到当前目录；`--installed` 一键刷新本机全部由 `geo-collector` 托管的 Skill；`--dry-run` 可查看目标而不写文件。Codex 使用 `.agents/skills/geo-collector/SKILL.md`，Claude Code 使用 `.claude/skills/geo-collector/SKILL.md`，Cursor 使用 `.cursor/skills/geo-collector/SKILL.md`；用户范围位于用户主目录，项目范围位于当前目录。Claude Code 用户范围也尊重 `CLAUDE_CONFIG_DIR`。用户自行改过的同名 Skill 会被保留并报告冲突，符号链接部署应通过原 Skill 管理工具更新。
 
-**维护者发布到 PyPI 后**，用户才能把安装命令中的 wheel 路径换成 `geo-collector==0.1.2`。如果选择文件托管，也可换成真实可信的 wheel 下载地址。发布前，按包名安装不是这个项目的可用交付方式。
+## 维护者：自动发布到 PyPI 与 GitHub Release
+
+仓库已配置 `.github/workflows/ci.yml` 与 `.github/workflows/release.yml`（采用 PyPI OIDC Trusted Publishing，无需长期 API Token）：
+
+1. **一次性配置 PyPI Trusted Publisher**：登录 [PyPI](https://pypi.org/manage/account/publishing/)，新增 Pending Publisher：
+   - PyPI Project Name：`xiaohe-geo-collector`（以 `pyproject.toml` 中的 `project.name` 为准）
+   - Owner：`xy-tuoren`
+   - Repository：`geo-collector-python`
+   - Workflow name：`release.yml`
+   - Environment name：`pypi`（如需先试发 TestPyPI，可在 [TestPyPI](https://test.pypi.org/manage/account/publishing/) 同理绑定 `testpypi` 环境）
+2. **在 GitHub 仓库创建 Environment**：在仓库 `Settings → Environments` 中新建 `pypi`（及可选 `testpypi`）。
+3. **每次发版一条命令**：
+
+```sh
+# 自动更新版本与 uv.lock、跑全量检查并构建 wheel/ZIP，再按提示推送 tag 触发自动发布
+uv run python scripts/release.py 0.1.3 --push
+```
+
+推送 `v0.1.3` 后，GitHub Actions 会自动跑全量测试、验证 wheel 独立安装、发布到 PyPI 并创建带 `.whl` / `.tar.gz` / `-setup.zip` 与 `SHA256SUMS.txt` 的 GitHub Release。
 
 ## ZIP 安装方式
 

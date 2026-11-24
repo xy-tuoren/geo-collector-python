@@ -252,3 +252,36 @@ def test_shrunk_draft_requires_original_viewport_and_bound_divider(fault):
     kind, missing = direct.draft_session_verdict(current, '别的提问' if fault == 'draft' else phone.draft, baseline)
     assert (kind == 'aligned_divider') == (fault is None)
     assert bool(missing) == bool(fault)
+
+
+def test_preview_point_validates_template_or_control_offline_without_writing_assets(tmp_path):
+    phone = DirectPhone(stage='chat')
+    phone.show_session_label = False
+    scene = phone.observe()
+    image = _image(scene.png).copy()
+    draw = ImageDraw.Draw(image)
+    draw.rounded_rectangle((390, 92, 438, 132), radius=6, outline='black', width=3)
+    draw.line((414, 100, 414, 124), fill='black', width=3)
+    draw.line((402, 112, 426, 112), fill='black', width=3)
+    scene.png = _png(image)
+
+    state = {'entry': direct.ID, 'index': 1, 'tasks': [{'entry': direct.ID, 'index': 1, 'text': '测试题'}], 'phase': 'open'}
+    engine = StepEngine(None, RuleStore(tmp_path / 'rules'), tmp_path / 'batch', state)
+    with pytest.raises(NeedsRepair) as exc:
+        engine._request(direct.ID + '.new_session', '点击新建会话', scene, (), '找不到新会话控件')
+    req_file = Path(exc.value.request)
+    req = read_json(req_file)
+
+    def snapshot():
+        return {f: (f.stat().st_mtime_ns, f.read_bytes()) for f in tmp_path.rglob('*') if f.is_file()}
+
+    before_files = snapshot()
+    ok = cli.execute(cli.parser().parse_args(['repair', str(req_file), '--sha256', req['sha256'], '--preview', '--point', '414', '112']))
+    assert ok['next'] == 'submit_then_resume'
+    assert ok['inferred_target']['kind'] == 'template'
+    assert snapshot() == before_files, 'offline --preview --point must never write template files'
+
+    # Tapping the "发送" button via --preview --point is rejected offline by check_exploration.
+    bad = cli.execute(cli.parser().parse_args(['repair', str(req_file), '--sha256', req['sha256'], '--preview', '--point', '655', '1475']))
+    assert bad['scene_check'] == 'rejected' and '发送' in bad['missing_evidence'][0]
+    assert snapshot() == before_files

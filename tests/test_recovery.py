@@ -501,3 +501,84 @@ def test_capture_review_describes_missing_results_without_allowing_unchecked_mov
         with pytest.raises(ValueError, match="完整性复查"):
             submit_repair(file, plan=plan, sha256=request["sha256"])
     assert not machine.device.actions and not (file.parent / "response.json").exists()
+
+
+def test_stale_saved_route_falls_back_to_builtin_default_without_promoting_builtin(tmp_path):
+    from geo_collector.goals import page_guard
+
+    healthy = observation()
+    healthy.nodes.append({"package": PACKAGE, "resource_id": "app:id/header", "text": "搜索", "bounds": [10, 10, 80, 40]})
+    stale_route = {"route": [{
+        "action": recipe("重试")["actions"][0],
+        "before": page_guard(healthy),
+        "after": page_guard(healthy),
+    }]}
+    machine = engine(tmp_path, device=FakeDevice(healthy, observation(ready=True)))
+    machine.store.promote(PACKAGE, "open", stale_route, healthy, "agent")
+
+    result = perform(machine, defaults=[recipe("打开")])
+    assert is_ready(result)
+    assert machine.state.get("agent_requests", 0) == 0
+    assert machine.device.actions == [(45.0, 120.0)]
+    saved = machine.store.all()["rules"][f"{PACKAGE}:open"]
+    assert saved["revision"] == 1 and saved["failures"] == 1 and saved["source"] == "agent"
+
+
+def test_transient_exploration_and_route_pruning_exclude_systemui_and_retry_hops(tmp_path):
+    from geo_collector.goals import page_guard, prune_route
+
+    error_page = observation()
+    error_page.nodes = [
+        {"package": "com.android.systemui", "resource_id": "com.android.systemui:id/status_bar", "bounds": [0, 0, 180, 20]},
+        {"package": PACKAGE, "resource_id": f"{PACKAGE}:id/2vk", "bounds": [0, 20, 180, 60]},
+        {"package": PACKAGE, "resource_id": f"{PACKAGE}:id/search_bar", "text": "", "bounds": [10, 25, 140, 55]},
+        {"package": PACKAGE, "text": "重试", "bounds": [60, 180, 120, 220], "clickable": True},
+    ]
+    loaded_page = replace(error_page, nodes=[
+        error_page.nodes[0], error_page.nodes[2],
+        {"package": PACKAGE, "text": "打开", "bounds": [20, 100, 70, 140], "clickable": True},
+    ])
+    guard = page_guard(error_page)
+    assert guard["anchors"] == [{"kind": "node", "attr": "resource_id", "value": f"{PACKAGE}:id/search_bar"}]
+
+    class RetryThenOpenPhone(FakeDevice):
+        def tap(self, point, *, expected_package):
+            self.actions.append(tuple(point))
+            self.current = loaded_page if point == (90.0, 200.0) else observation(ready=True)
+
+    machine = engine(tmp_path, device=RetryThenOpenPhone(error_page))
+    file, req = request_for(machine)
+    submit_repair(file, plan={**recipe("重试"), "transient": True}, sha256=req["sha256"])
+    with pytest.raises(NeedsRepair) as second_stop:
+        perform(machine)
+    assert read_json(file)["status"] == "transient"
+    assert machine.state.get("transient_recovery_steps") == 1
+    assert "exploration" not in machine.state
+
+    second_file = Path(second_stop.value.request)
+    submit_repair(second_file, plan={**recipe("打开"), "explore": True}, sha256=read_json(second_file)["sha256"])
+    assert is_ready(perform(machine))
+    machine.commit_flows()
+    promoted = machine.store.get(PACKAGE, "open")["recipe"]["route"]
+    assert len(promoted) == 1 and promoted[0]["action"]["target"]["value"] == "打开"
+
+    # Even if a retry hop were recorded without --transient, prune_route strips it.
+    noisy = [
+        {"action": recipe("重试")["actions"][0], "before": guard, "after": page_guard(loaded_page)},
+        {"action": recipe("打开")["actions"][0], "before": page_guard(loaded_page), "after": page_guard(observation(ready=True))},
+    ]
+    assert len(prune_route(noisy)) == 1 and prune_route(noisy)[0]["action"]["target"]["value"] == "打开"
+
+
+def test_commit_flows_drops_product_entry_when_drawer_was_not_used(tmp_path):
+    machine = engine(tmp_path)
+    scene = observation()
+    machine.state["flow_candidates"] = {
+        "perception.products_entry": {
+            "recipe": {"perception": {"products_entry": {"kind": "ocr", "pattern": "^思密达·蒙脱石散$"}}},
+            "context": machine._context(scene),
+            "used": True,
+        }
+    }
+    machine.commit_flows({"products": {"present": True, "mode": "inline"}})
+    assert machine.store.get(PACKAGE, "perception.products_entry") is None

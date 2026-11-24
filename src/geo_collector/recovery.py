@@ -10,7 +10,7 @@ from pathlib import Path
 
 from .images import crop, stable
 from .rules import UI_LABELS, LocateError, apply_layout, infer_target, locate, present, validate_recipe
-from .goals import BEFORE_SEND, CONTRACT, bind_roles, guard_matches, page_guard, repair_context
+from .goals import BEFORE_SEND, CONTRACT, bind_roles, guard_matches, page_guard, prune_route, repair_context
 from .storage import event, read_json, write_json
 
 
@@ -129,7 +129,7 @@ def _repair_scene(request_file, sha256, *, archived=False):
     return request, observation
 
 
-def validate_repair_plan(request, observation, plan):
+def validate_repair_plan(request, observation, plan, *, skip_locate=False):
     validate_recipe(plan)
     if "interrupt" in plan:
         raise ValueError("中断规则需要 teach interrupt 验证实际关闭效果")
@@ -149,9 +149,9 @@ def validate_repair_plan(request, observation, plan):
         raise ValueError("布局方案只能用于布局请求，操作请求必须使用动作方案")
     if request.get("uncertain_send") or request.get("uncertain_action"):
         raise ValueError("操作结果不确定，不能用修复动作重放；先只读检查当前状态")
-    if plan.get("explore") and (request.get("step", "").endswith(".send") or request.get("readonly")):
+    if (plan.get("explore") or plan.get("transient")) and (request.get("step", "").endswith(".send") or request.get("readonly")):
         raise ValueError("发送和只读完整性检查不允许探索动作")
-    if "actions" in plan and "target" in plan["actions"][0]:
+    if not skip_locate and "actions" in plan and "target" in plan["actions"][0]:
         # Later actions may target a page that only exists after the first action.
         try:
             locate(plan["actions"][0]["target"], observation, Path(request["rule_assets"]))
@@ -176,13 +176,22 @@ def submit_repair(request_file, *, point=None, plan=None, sha256=None, candidate
             result = preview_plan(request, observation)
             return {**result, "scene_check": "rejected", "missing_evidence": [str(error)],
                     "next": "resume" if result["allowed_resolutions"] == ["resume"] else "revise_or_inspect"}
+    point_override = None
     if point is not None:
-        if preview:
-            raise ValueError("预演请使用已有候选或 --plan，--point 可能生成模板")
-        target = infer_target(observation, point, Path(request["rule_assets"]), request["hints"])
-        plan = {"actions": [{"type": "tap", "target": target}]}
+        try:
+            target = infer_target(observation, point, Path(request["rule_assets"]), request.get("hints", ()), save_assets=not preview)
+            plan = {"actions": [{"type": "tap", "target": target}]}
+            if preview:
+                point_override = (point[0] * observation.logical_size[0] / observation.physical_size[0],
+                                  point[1] * observation.logical_size[1] / observation.physical_size[1])
+        except (ValueError, LocateError) as error:
+            if not preview:
+                raise
+            result = preview_plan(request, observation)
+            return {**result, "scene_check": "rejected", "missing_evidence": [str(error)],
+                    "next": "resume" if result["allowed_resolutions"] == ["resume"] else "revise_or_inspect"}
     if preview:
-        result = preview_plan(request, observation, plan)
+        result = preview_plan(request, observation, plan, point_override=point_override)
         if request.get("status") != "pending":
             result["next"] = "archived_request"
         return result
@@ -234,17 +243,18 @@ class StepEngine:
         candidates = ([pending] if pending and pending["context"] == self._context(observation) else []) + self.store.candidates(observation.package, step, observation)
         for item in candidates:
             recipe = item["recipe"]
-            if "route" in recipe:
-                if guard_matches(recipe["route"][0]["before"], observation):
-                    return True
-            else:
-                try:
+            try:
+                if "route" in recipe:
+                    if not guard_matches(recipe["route"][0]["before"], observation):
+                        continue
+                    action = recipe["route"][0]["action"]
+                else:
                     action = recipe["actions"][0]
-                    if "target" in action:
-                        locate(action["target"], observation, self.store.assets)
-                    return True
-                except (LocateError, ValueError, OSError):
-                    pass
+                if "target" in action:
+                    locate(action["target"], observation, self.store.assets)
+                return True
+            except (LocateError, ValueError, OSError):
+                pass
         return False
 
     def review_capture(self, observation):
@@ -339,6 +349,10 @@ class StepEngine:
                     continue
                 if step in {"perception.citations_header", "perception.citations_rows"} and result.get("citation_confirmation_method") != "learned_roles_with_visible_reference_text":
                     continue
+                if step == "perception.products_header" and not (result.get("products") or {}).get("present"):
+                    continue
+                if step == "perception.products_entry" and (result.get("products") or {}).get("mode") != "drawer":
+                    continue
             context = SimpleNamespace(**item["context"])
             self.store.promote(context.package, step, item["recipe"], context, "agent")
             if item.get("request"):
@@ -346,6 +360,16 @@ class StepEngine:
                 value.update(status="verified", finished_at=time.time())
                 write_json(Path(item["request"]), value)
             self.log("flow_rule_promoted", step=step, capture_complete=True)
+        pending_lessons = self.state.pop("lesson_candidates", [])
+        recalled_lessons = self.state.pop("recalled_lessons", [])
+        if pending_lessons or recalled_lessons:
+            from .lessons import LessonStore
+            lesson_store = LessonStore(self.store.root)
+            for spec in pending_lessons:
+                saved = lesson_store.add(spec)
+                self.log("lesson_promoted", lesson_id=saved["id"], strategy=saved["strategy"])
+            for lid in recalled_lessons:
+                lesson_store.record_outcome(lid, success=True)
         self.save()
 
     def resolve_capture_request(self, step):
@@ -577,13 +601,14 @@ class StepEngine:
             self.device.swipe(start, end, expected_package=package)
 
     def _explore(self, step, goal, package, postcondition, recipe, observation, file, *, before_action=None):
+        transient = bool(recipe.get("transient"))
         trace = self.state.setdefault("exploration", {"step": step, "context": self._context(observation), "route": []})
         if trace["step"] != step:
             raise LocateError("探索断点与当前目标不一致")
         if trace.get("dispatched"):
             # A process may die after dispatch. Never guess whether the action ran.
             raise LocateError("探索动作结果不确定，先观察并使用只读resume确认目标；不能重放")
-        if len(trace["route"]) >= 32:
+        if not transient and len(trace["route"]) >= 32:
             raise LocateError("单目标探索已达32步，保留证据，不能无限点击")
         action = recipe["actions"][0]
         hop = {"action": action, "before": page_guard(observation)}
@@ -597,12 +622,19 @@ class StepEngine:
         after = self.observe()
         if after.package != package:
             raise LocateError("探索后离开目标应用，已停止")
-        hop["after"] = page_guard(after)
-        trace["route"].append(hop)
         trace.pop("dispatched")
-        self.state["goal_exploration_steps"] = self.state.get("goal_exploration_steps", 0) + 1
-        self._close_request(file, "explored")
-        self.log("goal_exploration_step", step=step, ordinal=len(trace["route"]), goal_satisfied=bool(postcondition(after)))
+        if transient:
+            if not trace["route"]:
+                self.state.pop("exploration", None)
+            self.state["transient_recovery_steps"] = self.state.get("transient_recovery_steps", 0) + 1
+            self._close_request(file, "transient")
+            self.log("transient_recovery_step", step=step, goal_satisfied=bool(postcondition(after)))
+        else:
+            hop["after"] = page_guard(after)
+            trace["route"].append(hop)
+            self.state["goal_exploration_steps"] = self.state.get("goal_exploration_steps", 0) + 1
+            self._close_request(file, "explored")
+            self.log("goal_exploration_step", step=step, ordinal=len(trace["route"]), goal_satisfied=bool(postcondition(after)))
         if postcondition(after):
             return self._finish_exploration(step, after)
         # Observe the resulting page before asking for another action. No 12s
@@ -616,51 +648,60 @@ class StepEngine:
     def _finish_exploration(self, step, observation):
         trace = self.state.pop("exploration", None)
         if trace and trace["step"] == step and not trace.get("dispatched") and trace["route"]:
-            self.state.setdefault("flow_candidates", {})[step] = {"recipe": {"route": trace["route"]}, "context": trace["context"]}
-            self.log("goal_route_learned", step=step, steps=len(trace["route"]), reusable=False)
+            pruned = prune_route(trace["route"])
+            if pruned:
+                self.state.setdefault("flow_candidates", {})[step] = {"recipe": {"route": pruned}, "context": trace["context"]}
+                self.log("goal_route_learned", step=step, steps=len(pruned), reusable=False)
         self.teach.discard(step)
         return self._already_satisfied(step, observation)
 
     def _replay_route(self, step, package, recipe, observation, postcondition, before_action):
         trace = {"step": step, "context": self._context(observation), "route": []}
         self.state["exploration"] = trace
-        for index, hop in enumerate(recipe["route"]):
-            if postcondition(observation):
-                self.state.pop("exploration", None)
-                return observation
-            if observation.package != package or not guard_matches(hop["before"], observation):
-                raise LocateError("已保存路径的中间页面变化")
-            if index == 0 and before_action:
-                before_action()
-            actual = {"action": hop["action"], "before": page_guard(observation)}
-            def dispatching():
-                trace["dispatched"] = actual
-                self.state["inflight"] = {"step": step, "risk": "route", "before": time.time()}
+        try:
+            for index, hop in enumerate(recipe["route"]):
+                if postcondition(observation):
+                    self.state.pop("exploration", None)
+                    return observation
+                if observation.package != package or not guard_matches(hop["before"], observation):
+                    raise LocateError("已保存路径的中间页面变化")
+                if index == 0 and before_action:
+                    before_action()
+                actual = {"action": hop["action"], "before": page_guard(observation)}
+                def dispatching():
+                    trace["dispatched"] = actual
+                    self.state["inflight"] = {"step": step, "risk": "route", "before": time.time()}
+                    self.save()
+                self._act(hop["action"], observation, package, exploration=True, before_dispatch=dispatching)
+                time.sleep(.35)
+                observation = self.observe()
+                if observation.package == package:
+                    actual["after"] = page_guard(observation)
+                    trace["route"].append(actual)
+                    trace.pop("dispatched", None)
+                    self.save()
+                if observation.package != package or not guard_matches(hop["after"], observation):
+                    raise LocateError("路径动作后的页面证据变化，停止剩余动作")
+                self.state.pop("inflight", None)
+                self.state["goal_route_replay_steps"] = self.state.get("goal_route_replay_steps", 0) + 1
                 self.save()
-            self._act(hop["action"], observation, package, exploration=True, before_dispatch=dispatching)
-            time.sleep(.35)
-            observation = self.observe()
-            if observation.package == package:
-                actual["after"] = page_guard(observation)
-                trace["route"].append(actual)
-                trace.pop("dispatched", None)
-                self.save()
-            if observation.package != package or not guard_matches(hop["after"], observation):
-                raise LocateError("路径动作后的页面证据变化，停止剩余动作")
-            self.state.pop("inflight", None)
-            self.state["goal_route_replay_steps"] = self.state.get("goal_route_replay_steps", 0) + 1
-            self.save()
-            self.log("goal_route_replayed", step=step, ordinal=index + 1)
-        deadline = time.monotonic() + 12
-        while not postcondition(observation):
-            if time.monotonic() >= deadline:
-                raise LocateError("路径结束后原目标未达成")
-            time.sleep(.25)
-            observation = self.observe()
-            if observation.package != package:
-                raise LocateError("路径结束后离开目标应用")
-        self.state.pop("exploration", None)
-        return observation
+                self.log("goal_route_replayed", step=step, ordinal=index + 1)
+            deadline = time.monotonic() + 12
+            while not postcondition(observation):
+                if time.monotonic() >= deadline:
+                    raise LocateError("路径结束后原目标未达成")
+                time.sleep(.25)
+                observation = self.observe()
+                if observation.package != package:
+                    raise LocateError("路径结束后离开目标应用")
+            self.state.pop("exploration", None)
+            return observation
+        finally:
+            if not trace.get("dispatched"):
+                self.state.pop("inflight", None)
+                if not trace["route"] and self.state.get("exploration") is trace:
+                    self.state.pop("exploration", None)
+                    self.save()
 
     def perform(self, step, goal, package, postcondition, *, defaults=(), hints=(), force=False, risk="tap", before_action=None):
         original_check = postcondition
@@ -683,33 +724,42 @@ class StepEngine:
                     raise RuntimeError(f"步骤 {step} 要求前台 {package}，实际 {observation.package}")
                 if not force and postcondition(observation):
                     return self._finish_exploration(step, observation)
-        learned = self.store.get(package, step, observation)
-        recipe, source, request_file = None, "builtin", None
-        if not self.state.get("pending_request") and not self.state.get("exploration") and step not in self.teach and not uncertain:
+        tried: set[tuple[str, int]] = set()
+
+        def pick_candidate(current_obs):
+            if self.state.get("pending_request") or self.state.get("exploration") or step in self.teach or uncertain:
+                return None, "builtin", None, None
             pending = self.state.get("flow_candidates", {}).get(step)
-            records = ([pending] if pending and pending["context"] == self._context(observation) else []) + self.store.candidates(package, step, observation)
-            for record in [*records, *({"recipe": r} for r in defaults)]:
-                candidate = record["recipe"]
+            records = ([pending] if pending and pending["context"] == self._context(current_obs) else []) + self.store.candidates(package, step, current_obs)
+            for idx, record in enumerate([*records, *({"recipe": r} for r in defaults)]):
                 candidate_source = "saved" if "revision" in record else "candidate" if record is pending else "builtin"
+                token = (candidate_source, record["revision"] if candidate_source == "saved" else idx)
+                if token in tried:
+                    continue
+                tried.add(token)
+                candidate = record["recipe"]
                 try:
                     validate_recipe(candidate)
                     if "route" in candidate:
-                        if risk == "send" or not guard_matches(candidate["route"][0]["before"], observation):
+                        if risk == "send" or not guard_matches(candidate["route"][0]["before"], current_obs):
                             continue
-                        recipe, source, learned = candidate, "saved" if "revision" in record else "candidate", record
-                        break
+                        first_hop = candidate["route"][0]["action"]
+                        if first_hop["type"] == "tap" or "target" in first_hop:
+                            locate(first_hop["target"], current_obs, self.store.assets)
+                        return candidate, ("saved" if "revision" in record else "candidate"), record, None
                     first = candidate["actions"][0]
                     if first["type"] == "tap" or "target" in first:
-                        locate(first["target"], observation, self.store.assets)
-                    recipe, source = candidate, candidate_source
-                    learned = record if candidate_source == "saved" else None
-                    if candidate_source == "candidate":
-                        request_file = record.get("request")
-                    break
+                        locate(first["target"], current_obs, self.store.assets)
+                    return (candidate, candidate_source,
+                            record if candidate_source == "saved" else None,
+                            record.get("request") if candidate_source == "candidate" else None)
                 except (LocateError, ValueError, OSError):
                     if candidate_source == "saved":
-                        self.store.invalidate(package, step, "缓存规则不能唯一定位", record["revision"], observation.version)
+                        self.store.invalidate(package, step, "缓存规则不能唯一定位", record["revision"], current_obs.version)
                     continue
+            return None, "builtin", None, None
+
+        recipe, source, learned, request_file = pick_candidate(observation)
         for attempt in range(3):
             action_before = None
             action_dispatched = False
@@ -722,7 +772,7 @@ class StepEngine:
             if "perception" in recipe:
                 self._accept_perception(recipe, observation, request_file)
                 return self.perform(step, goal, package, postcondition, defaults=defaults, hints=hints, force=force, risk=risk, before_action=before_action)
-            if recipe.get("explore") or (self.state.get("exploration") and "actions" in recipe):
+            if recipe.get("explore") or recipe.get("transient") or (self.state.get("exploration") and "actions" in recipe):
                 if risk == "send":
                     raise LocateError("发送步骤不允许探索")
                 if len(recipe["actions"]) != 1:
@@ -761,12 +811,12 @@ class StepEngine:
                     if time.monotonic() >= deadline:
                         raise LocateError("动作后目标页面/状态未通过验证")
                     time.sleep(.25)
-                deferred = source != "saved" and step.startswith("capture.")
+                deferred = source not in {"saved", "builtin"} and step.startswith("capture.")
                 if deferred:
                     self.state.setdefault("flow_candidates", {})[step] = {
                         "recipe": recipe, "context": self._context(rule_context), "request": str(request_file) if request_file else None}
                     self.log("capture_method_candidate", step=step, reusable=False)
-                elif source != "saved":
+                elif source not in {"saved", "builtin"}:
                     self.store.promote(package, step, recipe, rule_context, source)
                     self.log("rule_promoted", step=step, source=source)
                 elif learned:
@@ -787,7 +837,7 @@ class StepEngine:
             except NeedsRepair:
                 raise
             except (LocateError, RuntimeError, OSError) as error:
-                if not action_dispatched:
+                if not action_dispatched or risk == "tap":
                     self.state.pop("inflight", None)
                 self.log("step_failed", step=step, source=source, error=str(error))
                 if source == "saved":
@@ -810,5 +860,8 @@ class StepEngine:
                         self.log("toggle_no_effect_confirmed", step=step)
                 if risk in {"send", "toggle"} and self.state.get("inflight", {}).get("step") == step:
                     self._request(step, goal, observation, hints, "动作可能已执行，仅允许只读确认，不重放", uncertain_send=risk == "send", uncertain_action=risk == "toggle")
-                recipe = None
+                if source in {"saved", "candidate"} and observation.package == package and not self.state.get("inflight") and not self.state.get("exploration"):
+                    recipe, source, learned, request_file = pick_candidate(observation)
+                else:
+                    recipe = None
         raise RuntimeError(f"步骤 {step} 的恢复次数已耗尽")

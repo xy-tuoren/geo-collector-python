@@ -127,3 +127,55 @@ def test_setup_cli_returns_failure_for_conflict(workspace, capsys):
     skill.write_text("edited", encoding="utf-8")
     assert cli.main(["setup", "--agent", "cursor"]) == 1
     assert json.loads(capsys.readouterr().out)["status"] == "failed"
+
+
+def test_setup_installed_refreshes_only_managed_skills_and_skips_edited(workspace, monkeypatch):
+    setup.install_skill("codex")
+    setup.install_skill("cursor")
+    home, _ = workspace
+    (home / ".cursor/skills/geo-collector/SKILL.md").write_text("custom edit", encoding="utf-8")
+    monkeypatch.setattr(setup, "agent_guide", lambda: "updated guide content\n")
+
+    result = cli.execute(cli.parser().parse_args(["setup", "--installed"]))
+    assert result["status"] == "updated"
+    assert [row["agent"] for row in result["skills"]] == ["codex"]
+    assert result["skills"][0]["action"] == "updated"
+    assert (home / ".agents/skills/geo-collector/SKILL.md").read_text(encoding="utf-8") == "updated guide content\n"
+    assert [row["agent"] for row in result["skipped"]] == ["cursor"]
+    assert not (home / ".claude").exists()
+
+
+def test_upgrade_dry_run_and_mirror_and_version_validation(workspace, monkeypatch):
+    preview = cli.execute(cli.parser().parse_args(["upgrade", "--mirror", "tuna", "--dry-run"]))
+    assert preview["status"] == "preview"
+    assert preview["index_url"] == setup.MIRRORS["tuna"]
+    assert "--default-index" in preview["commands"][0] and "upgrade" in preview["commands"][0]
+    assert preview["commands"][1] == ["geo-collect", "setup", "--installed"]
+
+    pinned = cli.execute(cli.parser().parse_args(["upgrade", "--version", "0.2.0", "--no-refresh-skills", "--dry-run"]))
+    assert pinned["commands"] == [[pinned["commands"][0][0], "tool", "install", "--force", "--python", "3.11", "xiaohe-geo-collector==0.2.0"]]
+
+    with pytest.raises(ValueError, match="版本号格式无效"):
+        cli.execute(cli.parser().parse_args(["upgrade", "--version", "bad;rm", "--dry-run"]))
+    with pytest.raises(ValueError, match="只能提供一个"):
+        cli.execute(cli.parser().parse_args(["upgrade", "--mirror", "tuna", "--index-url", "https://example.com/simple", "--dry-run"]))
+
+    calls = []
+    class Proc:
+        def __init__(self, stdout="", returncode=0):
+            self.stdout, self.stderr, self.returncode = stdout, "", returncode
+
+    def fake_run(cmd, **_):
+        calls.append(cmd)
+        if "--version" in cmd:
+            return Proc("geo-collect 0.2.0\n")
+        if "--installed" in cmd:
+            return Proc(json.dumps({"status": "updated", "skills": []}))
+        return Proc()
+
+    monkeypatch.setattr(setup.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(setup.subprocess, "run", fake_run)
+    upgraded = cli.execute(cli.parser().parse_args(["upgrade", "--mirror", "aliyun"]))
+    assert upgraded["status"] == "upgraded" and upgraded["version"] == "0.2.0"
+    assert calls[0] == ["/usr/bin/uv", "tool", "upgrade", "--default-index", setup.MIRRORS["aliyun"], "xiaohe-geo-collector"]
+    assert calls[1] == ["/usr/bin/geo-collect", "setup", "--installed"]

@@ -1,9 +1,19 @@
 [project]
-name = "geo-collector"
+name = "xiaohe-geo-collector"
 version = "0.1.2"
 description = "Python Android capture CLI with verified reusable Agent repairs"
 readme = "README.md"
 requires-python = ">=3.11,<3.13"
+keywords = ["android", "adb", "uiautomator2", "ocr", "cli", "agent", "self-healing"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
 # Tool installations resolve these independently of uv.lock.
 dependencies = [
     "uiautomator2==3.7.0",
@@ -15,6 +25,12 @@ dependencies = [
     "onnxruntime==1.30.0",
     "opencv-python==4.14.0.94",
 ]
+
+[project.urls]
+Homepage = "https://github.com/xy-tuoren/geo-collector-python"
+Repository = "https://github.com/xy-tuoren/geo-collector-python"
+Issues = "https://github.com/xy-tuoren/geo-collector-python/issues"
+Changelog = "https://github.com/xy-tuoren/geo-collector-python/releases"
 
 [project.scripts]
 geo-collect = "geo_collector.cli:main"

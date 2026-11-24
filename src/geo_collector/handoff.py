@@ -20,17 +20,27 @@ def _inside(path, root):
     return path
 
 
-def _target(node, size):
-    attr = next((key for key in ("resource_id", "description", "text") if node.get(key)), None)
-    if attr is None:
+def _target(node, size, observation=None):
+    from .rules import generalize_region, is_obfuscated_id
+    rid = node.get("resource_id")
+    if rid and not is_obfuscated_id(rid):
+        attr = "resource_id"
+    elif node.get("description"):
+        attr = "description"
+    elif node.get("text"):
+        attr = "text"
+    elif rid:
+        attr = "resource_id"
+    else:
         return None
     bounds = node.get("bounds", [])
     if len(bounds) != 4 or len(size) != 2 or not all(size):
         return None
-    # A semantic anchor plus its observed region disambiguates repeated labels.
-    return {"kind": "node", "attr": attr, "value": str(node[attr]),
-            "region": [max(0, bounds[0] / size[0] - .005), max(0, bounds[1] / size[1] - .005),
-                       min(1, bounds[2] / size[0] + .005), min(1, bounds[3] / size[1] + .005)]}
+    # Start with the exact disambiguating box, then widen to a resilient band when still unique.
+    target = {"kind": "node", "attr": attr, "value": str(node[attr]),
+              "region": [max(0, bounds[0] / size[0] - .005), max(0, bounds[1] / size[1] - .005),
+                         min(1, bounds[2] / size[0] + .005), min(1, bounds[3] / size[1] + .005)]}
+    return generalize_region(target, observation, tuple(bounds)) if observation is not None else target
 
 
 def _failure_anchors(observation):
@@ -93,16 +103,19 @@ def _relevance(label, request):
 
 
 def _node_rank(node, size, request):
-    from .rules import UI_LABELS
+    from .rules import UI_LABELS, is_obfuscated_id
     label = node.get("text") or node.get("description") or ""
+    rid = node.get("resource_id") or ""
+    obfuscated = is_obfuscated_id(rid)
     bounds = node["bounds"]
     area = (bounds[2] - bounds[0]) * (bounds[3] - bounds[1]) / (size[0] * size[1])
     semantic = _relevance(label, request)
     score = semantic + (80 if node.get("class_name", "").endswith("Button") else 0)
     score += 60 if label in UI_LABELS else 0
-    score += 30 if node.get("resource_id") and label else 0
+    score += 30 if rid and not obfuscated and label else 0
+    score += 25 if node.get("description") and len(label) <= 24 else 0
     score += 20 if node.get("clickable") else 0
-    score += 10 if label else -200
+    score += 10 if label else (-280 if obfuscated else -200)
     score += 8 if bounds[1] / size[1] < .2 or bounds[3] / size[1] > .85 else 0
     score -= 250 if area > .3 else 0
     return (-score, area)
@@ -136,6 +149,7 @@ def _rank_nodes(nodes, size, request):
 def scene_candidates(request, observation, limit=24):
     """Stable IDs within one saved scene, shared by the host CLI and observer."""
     from .goals import BEFORE_SEND, CAPTURE_OBJECTIVES, SESSION_HINTS, SESSION_STEP
+    from .rules import generalize_region
     if request.get("step") in {SESSION_STEP, BEFORE_SEND}:
         request = {**request, "hints": [*request.get("hints", []), *SESSION_HINTS],
                    "objective": {"description": CAPTURE_OBJECTIVES[request["step"]][0]}}
@@ -149,7 +163,7 @@ def scene_candidates(request, observation, limit=24):
     targets, candidates = {}, []
     for index, node in enumerate(nodes[:limit]):
         key = f"n{index + 1}"
-        targets[key] = _target(node, size)
+        targets[key] = _target(node, size, observation)
         candidate = {"id": key, "at": [round((node["bounds"][0] + node["bounds"][2]) / size[0] * 50),
                                           round((node["bounds"][1] + node["bounds"][3]) / size[1] * 50)]}
         label = node.get("text") or node.get("description")
@@ -171,9 +185,10 @@ def scene_candidates(request, observation, limit=24):
         bounds = line.get("bounds", [])
         if len(bounds) != 4 or len(physical) != 2 or not all(physical):
             continue
-        targets[key] = {"kind": "ocr", "pattern": "^" + re.escape(line["text"]) + "$",
-                        "region": [max(0, bounds[0] / physical[0] - .005), max(0, bounds[1] / physical[1] - .005),
-                                   min(1, bounds[2] / physical[0] + .005), min(1, bounds[3] / physical[1] + .005)]}
+        raw_ocr = {"kind": "ocr", "pattern": "^" + re.escape(line["text"]) + "$",
+                   "region": [max(0, bounds[0] / physical[0] - .005), max(0, bounds[1] / physical[1] - .005),
+                              min(1, bounds[2] / physical[0] + .005), min(1, bounds[3] / physical[1] + .005)]}
+        targets[key] = generalize_region(raw_ocr, observation, tuple(bounds))
         candidates.append({"id": key, "label": _text(line["text"], 100),
                            "at": [round((bounds[0] + bounds[2]) / physical[0] * 50),
                                   round((bounds[1] + bounds[3]) / physical[1] * 50)], "ocr": True})
@@ -215,9 +230,33 @@ def build_handoff(run_directory, status=None, *, limit=24):
         observation, screenshot, digest = {}, None, None
     targets, candidates, truncated = scene_candidates(request, observation, limit)
     objective = request.get("objective") or {}
+    step = request.get("step") or state.get("exploration", {}).get("step")
+    uncertain = bool(state.get("inflight") or state.get("exploration", {}).get("dispatched")
+                     or request.get("uncertain_send") or request.get("uncertain_action"))
+    from .lessons import LessonStore
+    from .triage import classify_failure
+    triage = classify_failure(request, observation, candidates, uncertain=uncertain)
+    prior_lessons = []
+    rule_root = state.get("rule_root")
+    if isinstance(rule_root, str) and rule_root:
+        rule_path = Path(rule_root)
+        if rule_path.is_dir():
+            scene_texts = [str(item.get("label") or "") for item in candidates] + [
+                str(line.get("text") or "") for line in observation.get("texts", []) if line.get("confidence", 0) >= .78
+            ]
+            reason_text = " ".join(str(x) for x in request.get("missing_evidence", [request.get("reason")]) if x)
+            prior_lessons = LessonStore(rule_path).recall(
+                entry=str(task.get("entry") or ""),
+                package=str(observation.get("package") or request.get("package") or ""),
+                step=str(step or ""),
+                activity=str(observation.get("activity") or ""),
+                texts=scene_texts,
+                reason=reason_text,
+                limit=3,
+            )
     prompt = {"task": {**{key: task.get(key) for key in ("entry", "index", "phase")},
                        "text": _text(task.get("text"), 500), "text_truncated": len(task.get("text", "")) > 500},
-              "step": request.get("step") or state.get("exploration", {}).get("step"),
+              "step": step,
               "objective": {"description": _text(objective.get("description") or request.get("goal")),
                             "required_evidence": [_text(item, 120) for item in objective.get("required_evidence", [])[:8]]},
               "missing_evidence": [_text(item) for item in request.get("missing_evidence", [request.get("reason")])[:4]],
@@ -227,11 +266,12 @@ def build_handoff(run_directory, status=None, *, limit=24):
                                          "confirmation_dispatched", "question_dispatch_pending")
                              if key in request.get("checkpoint", {}) or key in ("preparation", "body_frames", "products_phase")},
               "page": {key: observation.get(key) for key in ("package", "activity", "logical_size", "physical_size")},
+              "triage": triage,
+              "prior_lessons": prior_lessons,
               "candidates": candidates, "candidates_truncated": truncated,
               "goal_check": status.get("goal_check"),
               "readonly": bool(request.get("readonly")),
-              "uncertain": bool(state.get("inflight") or state.get("exploration", {}).get("dispatched")
-                                or request.get("uncertain_send") or request.get("uncertain_action"))}
+              "uncertain": uncertain}
     # Do not send history, filesystem paths, device identity, raw XML, or question lists.
     fingerprint_data = {key: prompt[key] for key in ("task", "step", "objective", "checkpoint", "page")}
     fingerprint_data["anchors"] = _failure_anchors(observation)

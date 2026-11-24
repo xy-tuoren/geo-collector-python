@@ -1,0 +1,181 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Publish target for manual dispatch"
+        type: choice
+        default: testpypi
+        options:
+          - testpypi
+          - pypi
+          - none
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      package_name: ${{ steps.meta.outputs.package_name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install OpenCV runtime libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libgl1 libglib2.0-0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python 3.11
+        run: uv python install 3.11
+
+      - name: Validate version and tag consistency
+        id: meta
+        run: |
+          uv run python - <<'PY'
+          import os, tomllib
+          data = tomllib.loads(open("pyproject.toml", encoding="utf-8").read())["project"]
+          ver, name = data["version"], data["name"]
+          ref = os.environ.get("GITHUB_REF", "")
+          if ref.startswith("refs/tags/v"):
+              tag_ver = ref.removeprefix("refs/tags/v")
+              if tag_ver != ver:
+                  raise SystemExit(f"Tag v{tag_ver} does not match pyproject.toml version {ver}")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              out.write(f"version={ver}\n")
+              out.write(f"package_name={name}\n")
+          print(f"Building {name}=={ver}")
+          PY
+
+      - name: Sync locked dependencies and run tests
+        run: |
+          uv sync --locked
+          uv run python -m compileall -q src
+          uv run pytest -q
+
+      - name: Build wheel, sdist, and setup ZIP
+        run: |
+          rm -rf dist
+          uv build --no-sources --out-dir dist
+          uv run python scripts/build_release.py
+          (cd dist && sha256sum * > SHA256SUMS.txt)
+          ls -lh dist
+
+      - name: Smoke-test built wheel in isolated tool environment
+        run: |
+          wheel=$(ls dist/*.whl)
+          uv tool install --force --python 3.11 "$wheel"
+          geo-collect --version
+          geo-collect entries
+          geo-collect goals
+          geo-collect agent-guide >/dev/null
+          geo-collect setup --agent codex --dry-run
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-dist
+          path: dist/
+
+  publish-pypi:
+    needs: build
+    if: >-
+      (startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, 'rc') && !contains(github.ref, 'test'))
+      || (github.event_name == 'workflow_dispatch' && inputs.target == 'pypi')
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/${{ needs.build.outputs.package_name }}
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-dist
+          path: dist/
+
+      - name: Keep only wheel and sdist for PyPI
+        run: |
+          mkdir -p pypi-dist
+          cp dist/*.whl dist/*.tar.gz pypi-dist/
+
+      - name: Publish to PyPI via OIDC Trusted Publishing
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: pypi-dist/
+
+  publish-testpypi:
+    needs: build
+    if: github.event_name == 'workflow_dispatch' && inputs.target == 'testpypi'
+    runs-on: ubuntu-latest
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/p/${{ needs.build.outputs.package_name }}
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-dist
+          path: dist/
+
+      - name: Keep only wheel and sdist for TestPyPI
+        run: |
+          mkdir -p pypi-dist
+          cp dist/*.whl dist/*.tar.gz pypi-dist/
+
+      - name: Publish to TestPyPI via OIDC Trusted Publishing
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          packages-dir: pypi-dist/
+
+  github-release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-dist
+          path: dist/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: dist/*
+          body: |
+            ## 安装与一键更新
+
+            ### 首次安装（PyPI）
+            ```sh
+            uv tool install --python 3.11 ${{ needs.build.outputs.package_name }} && geo-collect setup --agent codex
+            ```
+
+            ### 国内镜像快速安装
+            ```sh
+            uv tool install --python 3.11 --default-index https://pypi.tuna.tsinghua.edu.cn/simple ${{ needs.build.outputs.package_name }} && geo-collect setup --agent codex
+            ```
+
+            ### 已安装用户一键更新（同时升级 CLI 与配套 Skill）
+            ```sh
+            geo-collect upgrade
+            # 国内网络可加清华镜像：
+            geo-collect upgrade --mirror tuna
+            ```
+
+            > Claude Code 请将 `codex` 替换为 `claude-code`，Cursor 请替换为 `cursor`。

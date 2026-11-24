@@ -75,7 +75,7 @@ def _screen_check(request, scene):
     return ok, [] if ok else request.get('objective', {}).get('required_evidence') or [request.get('goal') or step], {}
 
 
-def preview_plan(request, observation, plan=None):
+def preview_plan(request, observation, plan=None, *, point_override=None):
     from .recovery import check_exploration, validate_repair_plan
     allowed = request.get('allowed_resolutions', ['resume'])
     result = {'status': 'preview', 'request_id': request.get('request_id'), 'sha256': request.get('sha256'),
@@ -88,7 +88,7 @@ def preview_plan(request, observation, plan=None):
                 for role, target in validate_perception(plan)['perception'].items():
                     boxes = {tuple(n['bounds']) for n in role_matches(target, observation, observation.nodes)}
                     result['roles'][role] = {'matches': len(boxes), 'unique': len(boxes) == 1}
-            validate_repair_plan(request, observation, plan)
+            validate_repair_plan(request, observation, plan, skip_locate=point_override is not None)
             if 'perception' in plan:
                 scene = bind_roles(plan, observation, require=True)
             elif 'layout' in plan:
@@ -98,9 +98,12 @@ def preview_plan(request, observation, plan=None):
             else:
                 action = plan['actions'][0]
                 if not request['step'].endswith('.send'):
-                    point = locate(action['target'], scene, Path(request['rule_assets'])) if 'target' in action else None
+                    point = (point_override if point_override is not None
+                             else locate(action['target'], scene, Path(request['rule_assets'])) if 'target' in action else None)
                     state = {**request, 'products_resume': request.get('checkpoint', {}).get('products_phase')}
                     check_exploration(action, point, scene, state)
+                if point_override is not None:
+                    result['inferred_target'] = action.get('target')
                 result.update(next='submit_then_resume', missing_evidence=['首步定位通过。动作效果需要恢复后核验'])
                 return result
         ok, missing, details = _screen_check(request, scene)

@@ -17,7 +17,7 @@ Python 原生 Android 采集 CLI，支持小荷 AI 医生 APP、抖音搜索、�
 
 ## 安装与运行
 
-CLI 和配套 Skill 在同一个安装包内。已有 uv 的用户先用 `uv tool install --python 3.11 <wheel 文件或下载地址>` 全局安装，再执行 `geo-collect setup --agent codex` 安装 Skill；Claude Code 或 Cursor 用户分别选 `claude-code`、`cursor`。重新打开数据工作目录中的 Agent 会话后，直接发问题让 Agent 采集。`geo-collect agent-guide` 仍可离线读取同一份说明。当前尚未发布到 PyPI，需提供 wheel 文件才能分发。完整命令、手机连接和 ZIP 安装见 [首次使用指南](INSTALL.md)。维护者可以用 `uv build --no-sources` 构建 wheel 和源码包，或用 `uv run python scripts/build_release.py` 生成发布 ZIP。
+CLI 和配套 Skill 在同一个安装包内。已有 uv 的用户先用 `uv tool install --python 3.11 xiaohe-geo-collector`（国内可加 `--default-index https://pypi.tuna.tsinghua.edu.cn/simple`；首次发布前可替换为本地 wheel 路径）全局安装，再执行 `geo-collect setup --agent codex` 安装 Skill；Claude Code 或 Cursor 用户分别选 `claude-code`、`cursor`。后续升级只需运行 `geo-collect upgrade`（国内可加 `--mirror tuna`），会自动升级 CLI 并同步刷新本机已安装的受管 Skill。重新打开数据工作目录中的 Agent 会话后，直接发问题让 Agent 采集。`geo-collect agent-guide` 仍可离线读取同一份说明。完整安装、PyPI OIDC 自动发版配置和 ZIP 安装见 [首次使用指南](INSTALL.md)。维护者可用 `uv run python scripts/release.py <版本号> --push` 触发 GitHub Actions 自动测试、发布 PyPI 与 GitHub Release，或本地执行 `uv build --no-sources` / `uv run python scripts/build_release.py` 构建产物。
 
 在项目根目录运行。电脑需有 `uv` 和 ADB，手机需授权 USB 调试并解锁。批量题库为 UTF-8 文本，每行一题。
 
@@ -125,11 +125,16 @@ uv run geo-collect stats /绝对路径/batch_日期时间
 uv run geo-collect cases /绝对路径/batch_日期时间            # 待修复请求、失败现场、探索进度
 uv run geo-collect teach /绝对路径/batch_日期时间 status      # 目标、缺失证据、控件清单，保存现场 PNG/XML
 uv run geo-collect teach /绝对路径/batch_日期时间 tap --node description=关闭导航菜单
+uv run geo-collect teach /绝对路径/batch_日期时间 tap --point 629 165         # 无文案图标自动提取唯一视觉模板
+uv run geo-collect teach /绝对路径/batch_日期时间 tap --ocr '^重试$' --transient # 一次性网络重试，不写入永久路径
 uv run geo-collect teach /绝对路径/batch_日期时间 swipe --direction down --distance .4
 uv run geo-collect teach /绝对路径/batch_日期时间 perception --role question --node resource_id=example:id/q
 uv run geo-collect teach /绝对路径/batch_日期时间 interrupt --name update_dialog \
   --detect-node text=发现新版本 --node text=稍后再说
-uv run geo-collect resume /绝对路径/batch_日期时间            # 验收目标，记录路径候选
+uv run geo-collect teach /绝对路径/batch_日期时间 lesson --strategy transient_retry \
+  --match -10009 --note '抖音搜索遇 -10009 网络错误时用 --transient 点重试，不写入永久路径'
+uv run geo-collect lessons list                              # 查看已沉淀的排障经验库（lessons.json）
+uv run geo-collect resume /绝对路径/batch_日期时间            # 验收目标，记录路径与经验候选
 ```
 
 `teach` 每次执行一个已观察的动作，CLI 记录动作前后的页面结构到 `exploration` 断点，不需要 `response.json`、SHA256 或每步 `resume`。发送、购买、删除、聚焦输入框和只读复查请求仍被拒绝。目标达成后 `resume` 重新验收；整题通过才启用路径。重放中间页面不匹配会停止，保留已执行前缀，由 Agent 修好后保存完整替代路径。每个目标最多探索 32 步以防无限操作，这不是药品列表页数上限。
@@ -141,6 +146,7 @@ Agent 遇到陌生页面时，可先在同一份异常现场试验多个判断�
 ```sh
 uv run geo-collect repair "$request" --sha256 "$sha256" --preview
 uv run geo-collect repair "$request" --sha256 "$sha256" --preview --candidate "$id" --role session_welcome
+uv run geo-collect repair "$request" --sha256 "$sha256" --preview --point 629 165
 uv run geo-collect repair "$request" --sha256 "$sha256" --candidate "$id" --role session_welcome
 uv run geo-collect resume "$run"
 ```

@@ -18,7 +18,7 @@ from .goals import ROLES, bind_roles, page_guard
 from .platforms import PACKAGES, PLATFORMS
 from .platforms.common import edit
 from .recovery import StepEngine, save_observation
-from .rules import LocateError, locate, present, validate_recipe
+from .rules import UI_LABELS, LocateError, infer_target, locate, present, validate_recipe
 from .storage import read_json
 
 
@@ -47,16 +47,23 @@ def parse_target(node=None, ocr=None, region=None, offset=None):
 def summarize(observation, limit=60):
     """Compact page inventory for the Agent; the PNG/XML remain the full record."""
     rows = []
+    lw, lh = observation.logical_size
+    screen_area = max(1, lw * lh)
     for node in observation.nodes:
+        if node.get("package", "") not in ("", observation.package):
+            continue
         label = node.get("text") or node.get("description") or ""
         if not (label or node.get("resource_id")):
             continue
+        bounds = node["bounds"]
+        compact = (bounds[2] - bounds[0]) * (bounds[3] - bounds[1]) < screen_area * .25
+        semantic_control = compact and (label in UI_LABELS or bool(node.get("description") and len(label) <= 32))
         if not (node.get("clickable") or node.get("scrollable") or node.get("focused")
-                or node.get("class_name", "").endswith(("EditText", "Button"))):
+                or node.get("class_name", "").endswith(("EditText", "Button")) or semantic_control):
             continue
         rows.append({"text": node.get("text", "")[:60], "description": node.get("description", "")[:60],
                      "resource_id": node.get("resource_id", ""), "class": node.get("class_name", "").rsplit(".", 1)[-1],
-                     "bounds": list(node["bounds"]), "clickable": bool(node.get("clickable")), "focused": bool(node.get("focused"))})
+                     "bounds": list(bounds), "clickable": bool(node.get("clickable")), "focused": bool(node.get("focused"))})
     texts = [{"text": line["text"][:80], "bounds": list(line["bounds"])} for line in observation.texts if line.get("confidence", 0) >= .78]
     return {"package": observation.package, "activity": observation.activity, "version": observation.version,
             "logical_size": list(observation.logical_size), "physical_size": list(observation.physical_size),
@@ -196,11 +203,32 @@ class TeachSession:
                           "inspect scene PNG/XML, then `teach tap|swipe|back` one observed action, or `teach perception`")
         return result
 
+    def _note_recalled_lessons(self, step, observation, request):
+        from .lessons import LessonStore
+        if not (self.store.root / "lessons.json").exists():
+            return
+        texts = [str(n.get("text") or n.get("description") or "") for n in observation.nodes if n.get("package", "") in ("", observation.package)]
+        texts += [str(line.get("text") or "") for line in observation.texts if line.get("confidence", 0) >= .78]
+        recalled = LessonStore(self.store.root).recall(
+            entry=str((self.task or {}).get("entry") or self.state.get("entry") or ""),
+            package=observation.package,
+            step=str(step or ""),
+            activity=observation.activity,
+            texts=texts,
+            reason=str((request or {}).get("reason") or ""),
+            limit=3,
+        )
+        if recalled:
+            bucket = self.state.setdefault("recalled_lessons", [])
+            for item in recalled:
+                if item["id"] not in bucket:
+                    bucket.append(item["id"])
+
     # -- exploration actions ----------------------------------------------------------
-    def act(self, action, *, validate_observation=None):
+    def act(self, action, *, validate_observation=None, transient=False):
         file, request = self.request()
         self._guard_actions(request)
-        validate_recipe({"actions": [action], "explore": True})
+        validate_recipe({"actions": [action], **({"transient": True} if transient else {"explore": True})})
         step = request["step"] if request else self.state["exploration"]["step"]
         package = request["package"] if request else self.state["exploration"]["context"]["package"]
         observation = self._observe()
@@ -208,10 +236,11 @@ class TeachSession:
             validate_observation(observation)
         if observation.package != package:
             raise RuntimeError("前台应用与请求不一致")
+        self._note_recalled_lessons(step, observation, request)
         trace = self.state.setdefault("exploration", {"step": step, "context": self.engine._context(observation), "route": []})
         if trace["step"] != step:
             raise ValueError(f"进行中的探索属于 {trace['step']}，与当前请求 {step} 不一致")
-        if len(trace["route"]) >= 32:
+        if not transient and len(trace["route"]) >= 32:
             raise ValueError("单目标探索已达32步，保留证据，不能无限点击")
         if "target" in action:
             locate(action["target"], observation, self.store.assets)
@@ -237,19 +266,31 @@ class TeachSession:
         trace.pop("dispatched", None)
         result = {"action": action, "before": self._scene("before", observation)}
         if after.package != package:
+            if not trace["route"]:
+                self.state.pop("exploration", None)
             self.engine.save()
             self.engine.log("teach_left_app", step=step, package=after.package)
             result.update(after=self._scene("left-app", after), left_app=after.package, recorded=False,
                           next="use `teach launch` to bring the app back; this hop was not recorded")
             return result
-        hop["after"] = page_guard(after)
-        trace["route"].append(hop)
-        self.state["goal_exploration_steps"] = self.state.get("goal_exploration_steps", 0) + 1
-        if file and request.get("status") == "pending" and request["step"] == step:
-            self.engine._close_request(file, "explored")
+        if transient:
+            if not trace["route"]:
+                self.state.pop("exploration", None)
+            self.state["transient_recovery_steps"] = self.state.get("transient_recovery_steps", 0) + 1
+            if file and request.get("status") == "pending" and request["step"] == step:
+                self.engine._close_request(file, "transient")
+            else:
+                self.state["status"] = "running"
+                self.engine.save()
         else:
-            self.state["status"] = "running"
-            self.engine.save()
+            hop["after"] = page_guard(after)
+            trace["route"].append(hop)
+            self.state["goal_exploration_steps"] = self.state.get("goal_exploration_steps", 0) + 1
+            if file and request.get("status") == "pending" and request["step"] == step:
+                self.engine._close_request(file, "explored")
+            else:
+                self.state["status"] = "running"
+                self.engine.save()
         check = goal_check(step, self.task)
         satisfied = None
         if check is not None:
@@ -257,9 +298,13 @@ class TeachSession:
                 satisfied = bool(check(after))
             except Exception:  # noqa: BLE001
                 satisfied = None
-        self.engine.log("teach_action", step=step, ordinal=len(trace["route"]), goal_satisfied=satisfied)
-        result.update(after=self._scene("after", after), recorded=True, route_steps=len(trace["route"]),
-                      page=summarize(after), goal_check=satisfied if check is not None else "unavailable",
+        if transient:
+            self.engine.log("teach_transient_action", step=step, goal_satisfied=satisfied)
+        else:
+            self.engine.log("teach_action", step=step, ordinal=len(trace["route"]), goal_satisfied=satisfied)
+        result.update(after=self._scene("after", after), recorded=not transient, transient=transient,
+                      route_steps=len(trace["route"]), page=summarize(after),
+                      goal_check=satisfied if check is not None else "unavailable",
                       next=("goal reached: run `geo-collect resume` to verify and record the route" if satisfied
                             else "inspect the new scene and submit the next single action, or `resume` to let the run re-check"))
         return result
@@ -292,6 +337,7 @@ class TeachSession:
         observation = self._observe()
         if validate_observation is not None:
             validate_observation(observation)
+        self._note_recalled_lessons(request["step"] if request else "page.perception", observation, request)
         bind_roles(plan, observation, require=True)
         key = "perception." + role
         self.state.setdefault("flow_candidates", {})[key] = {
@@ -307,7 +353,7 @@ class TeachSession:
         return {"role": role, "target": target, "bound": True, "scene": self._scene("perception", observation),
                 "next": "run `geo-collect resume`; the role is committed only after the whole question passes"}
 
-    def interrupt(self, name, detect, actions, package=None):
+    def interrupt(self, name, detect, actions, package=None, *, validate_observation=None):
         self._guard_actions(self.request()[1], require_goal=False)
         if not re.fullmatch(r"[a-z0-9_]{2,40}", name):
             raise ValueError("中断名称仅允许小写字母、数字和下划线")
@@ -316,6 +362,8 @@ class TeachSession:
             raise ValueError("请通过 --entry 指定目标应用")
         recipe = validate_recipe({"interrupt": {"detect": detect, "actions": actions}})
         observation = self.engine.observe()
+        if validate_observation is not None:
+            validate_observation(observation)
         if observation.package != package:
             raise RuntimeError(f"前台应用是 {observation.package}，中断规则属于 {package}")
         if not present(detect, observation):
@@ -337,6 +385,75 @@ class TeachSession:
         self.engine.save()
         return {"step": step, "promoted": True, "before": self._scene("interrupt-before", before),
                 "after": self._scene("interrupt-after", after)}
+
+    def lesson(self, *, note, strategy="note", match_texts=(), role=None, immediate=False, source="user"):
+        return record_run_lesson(
+            self.run_dir,
+            store=self.store,
+            state=self.state,
+            note=note,
+            strategy=strategy,
+            match_texts=match_texts,
+            role=role,
+            immediate=immediate,
+            source=source,
+        )
+
+
+def record_run_lesson(run_dir, *, store=None, state=None, note, strategy="note", match_texts=(), role=None,
+                      immediate=False, source="user"):
+    """Stage or promote a troubleshooting lesson bound to a paused run's scene (offline)."""
+    from .lessons import LessonStore, lesson_id, validate_lesson
+    from .storage import event, write_json
+
+    run_dir = Path(run_dir).resolve()
+    state = state if state is not None else read_json(run_dir / "调试产物" / "run.json")
+    rule_root = Path(store.root) if store is not None else Path(state.get("rule_root") or ".geo-collector").resolve()
+    pending = state.get("pending_request")
+    request = read_json(Path(pending)) if pending and Path(pending).exists() else {}
+    task = next((item for item in state.get("tasks", [])
+                 if (item.get("entry"), item.get("index")) == (state.get("entry"), state.get("index"))), None)
+    if task is None:
+        task = next((item for item in state.get("tasks", []) if item.get("status") != "complete"), {})
+    entry = str(request.get("entry") or (task or {}).get("entry") or state.get("entry") or "")
+    package = str(request.get("package") or PACKAGES.get(entry, ""))
+    step = str(request.get("step") or state.get("exploration", {}).get("step") or "")
+    activity = ""
+    obs_path = request.get("observation")
+    if obs_path and Path(obs_path).is_file():
+        obs = read_json(Path(obs_path))
+        activity = str(obs.get("activity") or "")
+        package = package or str(obs.get("package") or "")
+    elif state.get("exploration", {}).get("context"):
+        ctx = state["exploration"]["context"]
+        activity = str(ctx.get("activity") or "")
+        package = package or str(ctx.get("package") or "")
+    spec = validate_lesson({
+        "entry": entry,
+        "package": package,
+        "step": step,
+        "activity": activity,
+        "match_texts": list(match_texts),
+        "strategy": strategy,
+        "role": role,
+        "note": note,
+        "source": source,
+    })
+    log_file = run_dir / "调试产物" / "events.jsonl"
+    if immediate or spec["strategy"] == "ask_user":
+        saved = LessonStore(rule_root).add(spec)
+        event(log_file, "lesson_promoted", entry=entry, question_index=state.get("index"),
+              lesson_id=saved["id"], strategy=saved["strategy"], immediate=True)
+        return {"lesson": saved, "staged": False, "promoted": True}
+    ident = lesson_id(spec)
+    candidates = state.setdefault("lesson_candidates", [])
+    candidates[:] = [item for item in candidates if lesson_id(item) != ident]
+    candidates.append(spec)
+    write_json(run_dir / "调试产物" / "run.json", state)
+    event(log_file, "lesson_staged", entry=entry, question_index=state.get("index"),
+          lesson_id=ident, strategy=spec["strategy"])
+    return {"lesson": {"id": ident, **spec}, "staged": True, "promoted": False,
+            "next": "run `geo-collect resume`; the lesson is promoted once the question passes acceptance"}
 
 
 def list_cases(run_dir):
@@ -371,21 +488,31 @@ def teach(device, store, run_dir, args):
         raise ValueError("不能在另一台手机上教学当前批次")
     session = TeachSession(device, store, run_dir, state)
     action = args.teach_action
+    transient = bool(getattr(args, "transient", False))
     if action == "status" or action == "observe":
         return session.status()
     if action == "launch":
         return session.launch()
     if action == "tap":
-        return session.act({"type": "tap", "target": parse_target(args.node, args.ocr, args.region, args.offset)})
+        point = getattr(args, "point", None)
+        if point is not None:
+            if args.node or args.ocr or args.region or args.offset:
+                raise ValueError("--point 不能与 --node/--ocr/--region/--offset 同时使用")
+            obs = session._observe()
+            _, req = session.request()
+            target = infer_target(obs, point, store.assets, (req or {}).get("hints", ()))
+        else:
+            target = parse_target(args.node, args.ocr, args.region, args.offset)
+        return session.act({"type": "tap", "target": target}, transient=transient)
     if action == "back":
-        return session.act({"type": "back"})
+        return session.act({"type": "back"}, transient=transient)
     if action == "swipe":
         step = {"type": "swipe", "direction": args.direction}
         if args.distance is not None:
             step["distance_fraction"] = args.distance
         if args.node or args.ocr:
             step["target"] = parse_target(args.node, args.ocr, args.region, args.offset)
-        return session.act(step)
+        return session.act(step, transient=transient)
     if action == "perception":
         return session.perception(args.role, parse_target(args.node, args.ocr, args.region, None))
     if action == "interrupt":

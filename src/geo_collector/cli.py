@@ -15,7 +15,10 @@ from .storage import DeviceLease, event_output, read_json, write_json
 
 
 def parser():
+    from .setup import MIRRORS, package_version
+
     root = argparse.ArgumentParser(description="Python 手机采集：规则自动运行，当前 Agent 按需修复，无额外模型配置。")
+    root.add_argument("--version", action="version", version=f"geo-collect {package_version()}")
     commands = root.add_subparsers(dest="command", required=True)
     for name in ("doctor", "inspect", "run", "resume", "recover", "supervise"):
         command = commands.add_parser(name)
@@ -59,6 +62,37 @@ def parser():
     target.add_argument("--plan", type=Path, help="tap/back/swipe动作，或有节点锚点的layout修复方案")
     rules = commands.add_parser("rules", help="列出规则及健康度：成功/失败次数、已验证版本、失活原因")
     rules.add_argument("--rule-dir", type=Path, default=Path(".geo-collector"))
+    lessons = commands.add_parser("lessons", help="管理本地排障经验库 lessons.json（离线，不连接手机）")
+    lessons.add_argument("--rule-dir", type=Path, default=None)
+    lessons.add_argument("--all", dest="include_inactive", action="store_true", help="包含已停用的历史经验")
+    lesson_actions = lessons.add_subparsers(dest="lesson_action")
+    lesson_list = lesson_actions.add_parser("list", help="列出经验库条目")
+    lesson_list.add_argument("--rule-dir", dest="sub_rule_dir", type=Path, default=None)
+    lesson_list.add_argument("--all", dest="sub_include_inactive", action="store_true")
+    lesson_add = lesson_actions.add_parser("add", help="新增或更新一条排障经验")
+    lesson_add.add_argument("--rule-dir", dest="sub_rule_dir", type=Path, default=None)
+    lesson_add.add_argument("--note", required=True, help="简短排障经验说明（2～240字）")
+    lesson_add.add_argument("--strategy", default="note",
+                            choices=["transient_retry", "bind_role", "register_interrupt", "explore_nav", "icon_template", "ask_user", "note"])
+    lesson_add.add_argument("--entry", choices=list(PLATFORMS))
+    lesson_add.add_argument("--package")
+    lesson_add.add_argument("--step")
+    lesson_add.add_argument("--activity")
+    lesson_add.add_argument("--role")
+    lesson_add.add_argument("--match", action="append", default=[], help="触发召回的页面关键字，可重复传参")
+    lesson_add.add_argument("--source", choices=["user", "agent", "auto"], default="user")
+    lesson_disable = lesson_actions.add_parser("disable", help="停用一条经验")
+    lesson_disable.add_argument("lesson_id")
+    lesson_disable.add_argument("--reason", default="手动停用")
+    lesson_disable.add_argument("--rule-dir", dest="sub_rule_dir", type=Path, default=None)
+    lesson_enable = lesson_actions.add_parser("enable", help="重新启用一条经验")
+    lesson_enable.add_argument("lesson_id")
+    lesson_enable.add_argument("--rule-dir", dest="sub_rule_dir", type=Path, default=None)
+    lesson_fb = lesson_actions.add_parser("feedback", help="记录经验有效或失效反馈（连续3次失效自动停用）")
+    lesson_fb.add_argument("lesson_id")
+    lesson_fb.add_argument("--outcome", choices=["success", "failure"], required=True)
+    lesson_fb.add_argument("--reason")
+    lesson_fb.add_argument("--rule-dir", dest="sub_rule_dir", type=Path, default=None)
     cases = commands.add_parser("cases", help="汇总一个批次的待修复请求、失败现场和探索进度")
     cases.add_argument("run_directory", type=Path)
     teach = commands.add_parser("teach", help="当前Agent逐步驱动手机完成未知目标；每次一个已观察动作，CLI记录页面证据，resume 验收后保存路径")
@@ -68,11 +102,14 @@ def parser():
     actions = teach.add_subparsers(dest="teach_action", required=True)
     for name in ("status", "observe", "launch"):
         actions.add_parser(name)
-    tap = actions.add_parser("tap", help="点击一个节点或文字锚点")
+    tap = actions.add_parser("tap", help="点击一个节点、文字锚点或物理坐标（自动提取语义/模板）")
+    tap.add_argument("--point", type=float, nargs=2, metavar=("X", "Y"), help="原始PNG物理坐标，自动提取语义锚点或局部模板")
     swipe = actions.add_parser("swipe", help="滑动；可选锚点作为起点")
     swipe.add_argument("--direction", choices=["up", "down"], required=True)
     swipe.add_argument("--distance", type=float, help="屏幕高度比例 0.05～0.8")
-    actions.add_parser("back", help="系统返回（当前回答模式和药品阶段禁用）")
+    back = actions.add_parser("back", help="系统返回（当前回答模式和药品阶段禁用）")
+    for nav in (tap, swipe, back):
+        nav.add_argument("--transient", action="store_true", help="一次性排障动作（如网络重试），仅推进当前现场，不写入可复用路径")
     perception = actions.add_parser("perception", help="绑定页面角色，如 --role question --node resource_id=app:id/q")
     perception.add_argument("--role", required=True)
     interrupt = actions.add_parser("interrupt", help="教一个可复用的弹层/对话框关闭规则并立即保存")
@@ -81,6 +118,13 @@ def parser():
     interrupt.add_argument("--detect-ocr", help="检测目标 OCR 正则")
     interrupt.add_argument("--back", action="store_true", help="用系统返回关闭，而不是点击")
     interrupt.add_argument("--entry", choices=list(PLATFORMS), help="没有当前题目时指定应用")
+    teach_lesson = actions.add_parser("lesson", help="离线记录当前异常场景的一句话排障经验（默认整题验收后晋升）")
+    teach_lesson.add_argument("--note", required=True, help="简短排障经验说明（2～240字）")
+    teach_lesson.add_argument("--strategy", default="note",
+                              choices=["transient_retry", "bind_role", "register_interrupt", "explore_nav", "icon_template", "ask_user", "note"])
+    teach_lesson.add_argument("--match", action="append", default=[], help="触发召回的页面关键字，可重复传参")
+    teach_lesson.add_argument("--role")
+    teach_lesson.add_argument("--immediate", action="store_true", help="立即写入经验库（如登录/验证码等人工阻塞经验）")
     for command in (tap, swipe, perception, interrupt):
         command.add_argument("--node", help="attr=value，attr 取 text/description/resource_id/class_name")
         command.add_argument("--ocr", help="OCR 文字正则")
@@ -94,10 +138,18 @@ def parser():
     commands.add_parser("goals", help="输出内置采集目标、不可降低的验收条件和Agent接管协议")
     commands.add_parser("entries", help="列出采集入口及实际进入方式；不连接手机")
     commands.add_parser("agent-guide", help="读取随包分发的 Agent 采集和异常接管说明；不连接手机")
-    setup = commands.add_parser("setup", help="为所选本地 Agent 安装随包分发的采集 Skill；不连接手机")
-    setup.add_argument("--agent", choices=["codex", "claude-code", "cursor"], required=True)
+    setup = commands.add_parser("setup", help="为所选本地 Agent 安装或刷新随包分发的采集 Skill；不连接手机")
+    setup_target = setup.add_mutually_exclusive_group(required=True)
+    setup_target.add_argument("--agent", choices=["codex", "claude-code", "cursor"])
+    setup_target.add_argument("--installed", action="store_true", help="刷新本机所有由 geo-collector 托管的已安装 Skill")
     setup.add_argument("--scope", choices=["user", "project"], default="user", help="默认当前用户；project 仅安装到当前工作目录")
     setup.add_argument("--dry-run", action="store_true", help="只检查目标并返回安装位置，不写文件")
+    upgrade = commands.add_parser("upgrade", help="一键通过 uv 更新 CLI 并同步刷新已安装的 Agent Skill；不连接手机")
+    upgrade.add_argument("--version", dest="target_version", help="升级到指定版本，如 0.1.3（默认最新）")
+    upgrade.add_argument("--mirror", choices=sorted(MIRRORS), help="使用预设 PyPI 镜像（国内推荐 tuna 或 aliyun）")
+    upgrade.add_argument("--index-url", help="自定义 PyPI Simple Index 地址")
+    upgrade.add_argument("--no-refresh-skills", action="store_true", help="仅升级 CLI，不自动刷新已安装的 Skill")
+    upgrade.add_argument("--dry-run", action="store_true", help="只输出将执行的更新命令，不实际修改环境")
     handoff = commands.add_parser("handoff", help="离线读取当前断点的精简现场，不连接手机")
     handoff.add_argument("run_directory", type=Path)
     handoff.add_argument("--limit", type=int, default=24, help="最多返回的节点候选数")
@@ -329,8 +381,14 @@ def execute(args):
         from .setup import agent_guide
         return {"format": "markdown", "guide": agent_guide()}
     if args.command == "setup":
-        from .setup import install_skill
+        from .setup import install_skill, refresh_installed_skills
+        if args.installed:
+            return refresh_installed_skills(scope=args.scope, dry_run=args.dry_run)
         return install_skill(args.agent, scope=args.scope, dry_run=args.dry_run)
+    if args.command == "upgrade":
+        from .setup import upgrade_cli
+        return upgrade_cli(target_version=args.target_version, index_url=args.index_url, mirror=args.mirror,
+                           dry_run=args.dry_run, refresh_skills=not args.no_refresh_skills)
     if args.command == "entries":
         from .platforms import ENTRY_LABELS
         return {"entries": [{"id": key, "name": ENTRY_LABELS[key], "package": platform.PACKAGE,
@@ -365,6 +423,41 @@ def execute(args):
                              sha256=args.sha256, candidate=args.candidate, role=args.role, preview=args.preview)
     if args.command == "rules":
         return {"rules": RuleStore(args.rule_dir).health()}
+    if args.command == "lessons":
+        from .lessons import LessonStore
+        root = getattr(args, "sub_rule_dir", None) or args.rule_dir or Path(".geo-collector")
+        store = LessonStore(root)
+        sub = args.lesson_action or "list"
+        if sub == "list":
+            include_all = bool(args.include_inactive or getattr(args, "sub_include_inactive", False))
+            return {"lessons": store.list(include_inactive=include_all), "file": str(store.file)}
+        if sub == "add":
+            saved = store.add({
+                "entry": args.entry or "",
+                "package": args.package or "",
+                "step": args.step or "",
+                "activity": args.activity or "",
+                "match_texts": args.match,
+                "strategy": args.strategy,
+                "role": args.role,
+                "note": args.note,
+                "source": args.source,
+            })
+            return {"lesson": saved, "file": str(store.file)}
+        if sub == "disable":
+            return {"lesson": store.disable(args.lesson_id, reason=args.reason)}
+        if sub == "enable":
+            return {"lesson": store.enable(args.lesson_id)}
+        if sub == "feedback":
+            updated = store.record_outcome(args.lesson_id, success=args.outcome == "success", reason=args.reason)
+            if updated is None:
+                raise ValueError(f"未找到经验记录：{args.lesson_id}")
+            return {"lesson": updated}
+        raise ValueError(f"未知经验操作 {sub}")
+    if args.command == "teach" and args.teach_action == "lesson":
+        from .teach import record_run_lesson
+        return record_run_lesson(args.run_directory, note=args.note, strategy=args.strategy,
+                                 match_texts=args.match, role=args.role, immediate=args.immediate)
     if args.command == "cases":
         from .teach import list_cases
         return list_cases(args.run_directory)

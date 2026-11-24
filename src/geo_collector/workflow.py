@@ -243,7 +243,8 @@ def run_questions(device, store, run_dir, state, wait=0, teach=()):
                 engine.log("submission_confirmed_without_replay")
                 _phase(engine, task, "submitted")
             if task["phase"] == "start":
-                device.launch(package, restart=False)
+                if not (callable(reuse := getattr(platform, "reuse_foreground", None)) and reuse(engine)):
+                    device.launch(package, restart=False)
                 _phase(engine, task, "open")
             if task["phase"] == "open":
                 _open(engine, task)

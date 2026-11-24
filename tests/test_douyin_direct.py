@@ -518,3 +518,36 @@ def test_latest_bubble_never_skips_different_or_partly_visible_question(clipped)
     else:
         with pytest.raises(CaptureError, match="第一条用户问题不匹配"):
             direct_question_bubble(observation, phone.question, viewport)
+
+
+def test_foreground_miniapp_reuses_activity_without_launcher_reset_and_waits_for_results(tmp_path, monkeypatch):
+    monkeypatch.setattr(workflow, "AnswerCapture", Capture)
+    monkeypatch.setattr("geo_collector.recovery.time.sleep", lambda _: None)
+    monkeypatch.setattr("geo_collector.platforms.douyin_direct.time.sleep", lambda _: None)
+
+    # 1. Already inside MiniAppHostActivity0 chat: start phase skips device.launch.
+    in_chat = DirectPhone(stage="chat")
+    run_chat = state(direct.ID)
+    workflow.run_questions(in_chat, RuleStore(tmp_path / "rules1"), tmp_path / "run1", run_chat)
+    assert run_chat["status"] == "complete"
+    assert ("launch", direct.PACKAGE) not in in_chat.calls
+
+    # 2. Delayed search results after name_search wait for results_loaded before handoff/entry.
+    class DelayedResultsPhone(DirectPhone):
+        def __init__(self):
+            super().__init__(stage="launcher")
+            self.results_polls = 0
+
+        def observe(self, ocr=False):
+            obs = super().observe(ocr=ocr)
+            if self.stage == "results" and self.results_polls < 2:
+                self.results_polls += 1
+                obs.nodes = [n for n in obs.nodes if n.get("text") not in {"综合", "视频", "小程序", "进入"}]
+                obs.texts = []
+            return obs
+
+    delayed = DelayedResultsPhone()
+    run_delayed = state(direct.ID)
+    workflow.run_questions(delayed, RuleStore(tmp_path / "rules2"), tmp_path / "run2", run_delayed)
+    assert run_delayed["status"] == "complete"
+    assert delayed.results_polls == 2

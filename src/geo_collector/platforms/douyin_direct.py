@@ -490,6 +490,12 @@ def _drawer_closed(observation):
     return drawer_state(observation) is None and bool(chat_state(observation) or home_target(observation))
 
 
+def reuse_foreground(engine):
+    """Avoid sending a launcher intent that resets an already-open Xiaohe mini-app."""
+    current = engine.observe()
+    return current.package == PACKAGE and bool(chat_state(current) or home_target(current))
+
+
 def open(engine, task):
     progress = task.setdefault("direct_open", {"stage": "discover"})
     if progress["stage"] == "discover":
@@ -530,6 +536,13 @@ def open(engine, task):
         _set_stage(engine, task, "entry")
     if progress["stage"] == "entry":
         current = engine.observe()
+        deadline = time.monotonic() + douyin.RESULT_READY_TIMEOUT
+        while (douyin.search_results_ready(current, QUERY)
+               and not douyin.results_loaded(current, QUERY)
+               and not (named_entry_defaults(current) or _named_card_evidence(current))
+               and time.monotonic() < deadline):
+            time.sleep(.5)
+            current = engine.observe()
         def before_entry():
             fresh = engine.observe()
             if not _named_card_evidence(fresh):
