@@ -185,7 +185,8 @@ def setup(monkeypatch):
     original = direct._SubmissionProbe.__init__
     def fast_probe(self, *args, **kwargs):
         original(self, *args, **kwargs)
-        self.quiet_seconds, self.generation_timeout_seconds = 0, 1
+        self._sleep = lambda _: None
+        self.quiet_seconds, self.generation_timeout_seconds = 0, 15
     monkeypatch.setattr(direct._SubmissionProbe, "__init__", fast_probe)
 
 
@@ -354,10 +355,29 @@ def test_returning_user_home_accepts_continue_consultation_with_brand_and_greeti
 class ScrolledSubmissionPhone(DirectPhone):
     """Model the MiniApp scrolling the question away while answering."""
 
+    _document_cache = {}
+    _viewport_png_cache = {}
+
     def __init__(self, scale=1):
         super().__init__(scale)
         self.position, self.latest_question, self.no_boundary = None, None, False
         self.read_scrolls = []
+
+    @classmethod
+    def _document(cls, scale, no_boundary):
+        key = (scale, no_boundary)
+        document = cls._document_cache.get(key)
+        if document is None:
+            document = Image.new("RGB", (720, 3000), "white")
+            ink, rng = ImageDraw.Draw(document), random.Random(471)
+            for y in range(180, 2900, 28):
+                for x in range(30, 700, 20):
+                    ink.rectangle((x, y, x + rng.randrange(4, 15), y + rng.randrange(5, 16)), fill=(45, 45, 45))
+            if not no_boundary:
+                ink.rectangle((150, 650, 710, 750), fill=(40, 200, 160))
+            document = document.resize((round(720 * scale), round(3000 * scale)), Image.Resampling.NEAREST)
+            cls._document_cache[key] = document
+        return document
 
     def observe(self, ocr=False):
         if self.position is None:
@@ -378,20 +398,18 @@ class ScrolledSubmissionPhone(DirectPhone):
         # These are real overlapping pixel viewports of one document, not
         # unrelated stage screenshots. Navigation seams are verified normally.
         source = {"middle": 600, "bottom": 800, "question": 0}[self.position]
-        document = Image.new("RGB", (720, 3000), "white")
-        ink, rng = ImageDraw.Draw(document), random.Random(471)
-        for y in range(180, 2900, 28):
-            for x in range(30, 700, 20):
-                ink.rectangle((x, y, x + rng.randrange(4, 15), y + rng.randrange(5, 16)), fill=(45, 45, 45))
-        if not self.no_boundary:
-            ink.rectangle((150, 650, 710, 750), fill=(40, 200, 160))
-        document = document.resize((round(720 * self.scale), round(3000 * self.scale)), Image.Resampling.NEAREST)
-        canvas = Image.open(io.BytesIO(result.png))
-        canvas.paste(document.crop(tuple(round(v * self.scale) for v in (0, 170 + source, 720, 1370 + source))),
-                     (0, round(170 * self.scale)))
-        output = io.BytesIO()
-        canvas.save(output, "PNG")
-        result.png = output.getvalue()
+        png_key = (self.scale, self.no_boundary, self.position, result.png)
+        rendered = self._viewport_png_cache.get(png_key)
+        if rendered is None:
+            document = self._document(self.scale, self.no_boundary)
+            canvas = Image.open(io.BytesIO(result.png))
+            canvas.paste(document.crop(tuple(round(v * self.scale) for v in (0, 170 + source, 720, 1370 + source))),
+                         (0, round(170 * self.scale)))
+            output = io.BytesIO()
+            canvas.save(output, "PNG")
+            rendered = output.getvalue()
+            self._viewport_png_cache[png_key] = rendered
+        result.png = rendered
         return result
 
     def swipe(self, start, end, duration=.4, *, expected_package):
