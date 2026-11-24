@@ -266,12 +266,30 @@ def test_verify_ignores_macos_finder_metadata(complete_run):
     assert cli.verify_run(directory)["complete"] is True
 
 
-def test_global_lease_blocks_all_rule_directories_before_device_initialization(tmp_path, monkeypatch):
+def test_per_serial_lease_blocks_same_device_across_rule_dirs_but_allows_other_devices(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
-    def never_connect(**_):
-        pytest.fail("a conflicting collector must not initialize a phone")
-    monkeypatch.setattr(device, "Device", never_connect)
-    with DeviceLease(tmp_path / ".cache" / "geo-collector", "phone-control"):
+    connected = []
+
+    class OtherPhone:
+        def __init__(self, serial=None, **_):
+            connected.append(serial)
+            self.serial = serial
+
+        def observe(self, ocr=True):
+            from geo_collector.device import Observation
+            buf = tmp_path / "dummy.png"
+            Image.new("RGB", (720, 1600), "white").save(buf, format="PNG")
+            return Observation(buf.read_bytes(), "<hierarchy/>", "app.demo", "Main", (720, 1600), (720, 1600), "1.0", [], [])
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(device, "Device", OtherPhone)
+    with DeviceLease(tmp_path / ".cache" / "geo-collector", "fake-device"):
         for rule_dir in (tmp_path / "store-a", tmp_path / "store-b"):
             with pytest.raises(RuntimeError, match="已有采集进程"):
                 cli.execute(args("doctor", "--serial", "fake-device", "--rule-dir", str(rule_dir)))
+        assert not connected
+        # A different serial uses its own lease and can run concurrently.
+        out = cli.execute(args("doctor", "--serial", "other-device", "--output", str(tmp_path / "out")))
+        assert out["serial"] == "other-device" and connected == ["other-device"]

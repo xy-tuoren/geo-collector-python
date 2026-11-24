@@ -123,6 +123,8 @@ def validate_recipe(recipe):
             if target["kind"] == "ocr" and (not isinstance(target.get("pattern"), str) or len(target["pattern"]) > 256):
                 raise ValueError("OCR pattern 必须是最多 256 字符的正则表达式。")
             if target["kind"] == "ocr":
+                if re.search(r"\([^)]*[+*][^)]*\)[+*]", target["pattern"]):
+                    raise ValueError("OCR 正则表达式包含可能导致回溯卡死的嵌套量词")
                 try:
                     re.compile(target["pattern"])
                 except re.error as error:

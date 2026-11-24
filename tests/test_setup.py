@@ -21,15 +21,23 @@ def workspace(tmp_path, monkeypatch):
     return home, project
 
 
-@pytest.mark.parametrize("agent,folder", [("codex", ".agents"), ("claude-code", ".claude"), ("cursor", ".cursor")])
+@pytest.mark.parametrize("agent,folder,canonical", [
+    ("codex", ".agents", "codex"),
+    ("claude-code", ".claude", "claude-code"),
+    ("cursor", ".cursor", "cursor"),
+    ("antigravity", ".gemini", "antigravity"),
+    ("gemini", ".gemini", "antigravity"),
+])
 @pytest.mark.parametrize("scope", ["user", "project"])
-def test_setup_installs_complete_guide_in_selected_scope_only(workspace, agent, folder, scope):
+def test_setup_installs_complete_guide_in_selected_scope_only(workspace, agent, folder, canonical, scope):
     home, project = workspace
     root, other = (home, project) if scope == "user" else (project, home)
     result = cli.execute(cli.parser().parse_args(["setup", "--agent", agent, "--scope", scope]))
     skill = root / folder / "skills/geo-collector/SKILL.md"
-    assert result["status"] == "installed" and result["skill_path"] == str(skill)
+    ref = root / folder / "skills/geo-collector/references/install.md"
+    assert result["status"] == "installed" and result["agent"] == canonical and result["skill_path"] == str(skill)
     assert skill.read_text(encoding="utf-8") == setup.agent_guide()
+    assert ref.read_text(encoding="utf-8") == setup.install_reference()
     assert not list(other.iterdir())
     assert not (project / "captures").exists()
     assert not (project / ".geo-collector").exists()
@@ -131,18 +139,47 @@ def test_setup_cli_returns_failure_for_conflict(workspace, capsys):
 
 def test_setup_installed_refreshes_only_managed_skills_and_skips_edited(workspace, monkeypatch):
     setup.install_skill("codex")
+    setup.install_skill("antigravity")
     setup.install_skill("cursor")
     home, _ = workspace
     (home / ".cursor/skills/geo-collector/SKILL.md").write_text("custom edit", encoding="utf-8")
     monkeypatch.setattr(setup, "agent_guide", lambda: "updated guide content\n")
+    monkeypatch.setattr(setup, "install_reference", lambda: "updated install ref\n")
 
     result = cli.execute(cli.parser().parse_args(["setup", "--installed"]))
     assert result["status"] == "updated"
-    assert [row["agent"] for row in result["skills"]] == ["codex"]
-    assert result["skills"][0]["action"] == "updated"
+    assert [row["agent"] for row in result["skills"]] == ["codex", "antigravity"]
+    assert all(row["action"] == "updated" for row in result["skills"])
     assert (home / ".agents/skills/geo-collector/SKILL.md").read_text(encoding="utf-8") == "updated guide content\n"
+    assert (home / ".gemini/skills/geo-collector/references/install.md").read_text(encoding="utf-8") == "updated install ref\n"
     assert [row["agent"] for row in result["skipped"]] == ["cursor"]
     assert not (home / ".claude").exists()
+
+
+def test_legacy_receipt_upgrades_with_references_and_edited_reference_is_preserved(workspace):
+    home, _ = workspace
+    directory = home / ".agents/skills/geo-collector"
+    directory.mkdir(parents=True)
+    skill = directory / "SKILL.md"
+    old_guide = "legacy skill content\n"
+    skill.write_text(old_guide, encoding="utf-8")
+    (directory / setup.RECEIPT).write_text(json.dumps({
+        "owner": "geo-collector",
+        "sha256": hashlib.sha256(old_guide.encode("utf-8")).hexdigest(),
+        "version": "0.1.3",
+    }), encoding="utf-8")
+
+    upgraded = setup.install_skill("codex")
+    ref = directory / "references/install.md"
+    assert upgraded["status"] == "updated"
+    assert skill.read_text(encoding="utf-8") == setup.agent_guide()
+    assert ref.read_text(encoding="utf-8") == setup.install_reference()
+
+    # Editing the bundled reference protects it from overwrite.
+    ref.write_text("custom install notes\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="已保留原文件"):
+        setup.install_skill("codex")
+    assert ref.read_text(encoding="utf-8") == "custom install notes\n"
 
 
 def test_upgrade_dry_run_and_mirror_and_version_validation(workspace, monkeypatch):
@@ -167,15 +204,23 @@ def test_upgrade_dry_run_and_mirror_and_version_validation(workspace, monkeypatc
 
     def fake_run(cmd, **_):
         calls.append(cmd)
+        if cmd[1:4] == ["tool", "dir", "--bin"]:
+            return Proc(str(bin_dir) + "\n")
         if "--version" in cmd:
             return Proc("geo-collect 0.2.0\n")
         if "--installed" in cmd:
             return Proc(json.dumps({"status": "updated", "skills": []}))
         return Proc()
 
-    monkeypatch.setattr(setup.shutil, "which", lambda name: f"/usr/bin/{name}")
+    bin_dir = workspace[0] / "uv-bin"
+    bin_dir.mkdir()
+    tool_geo = bin_dir / "geo-collect"
+    tool_geo.write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.setattr(setup.shutil, "which", lambda name: f"/venv/bin/{name}")
     monkeypatch.setattr(setup.subprocess, "run", fake_run)
     upgraded = cli.execute(cli.parser().parse_args(["upgrade", "--mirror", "aliyun"]))
     assert upgraded["status"] == "upgraded" and upgraded["version"] == "0.2.0"
-    assert calls[0] == ["/usr/bin/uv", "tool", "upgrade", "--default-index", setup.MIRRORS["aliyun"], "xiaohe-geo-collector"]
-    assert calls[1] == ["/usr/bin/geo-collect", "setup", "--installed"]
+    assert calls[0] == ["/venv/bin/uv", "tool", "upgrade", "--default-index", setup.MIRRORS["aliyun"], "xiaohe-geo-collector"]
+    assert calls[1] == ["/venv/bin/uv", "tool", "dir", "--bin"]
+    assert calls[2] == [str(tool_geo), "setup", "--installed"]
+    assert calls[3] == [str(tool_geo), "--version"]

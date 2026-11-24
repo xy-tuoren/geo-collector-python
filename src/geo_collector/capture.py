@@ -10,8 +10,8 @@ from uuid import uuid4
 import numpy as np
 from PIL import Image
 
-from .device import map_bounds, validate_geometry
-from .images import CaptureError, _image, compose, crop, image_size, match_overlap, match_product_overlap, stable
+from .device import map_bounds, physical_to_logical, validate_geometry
+from .images import CaptureError, _image, compose, compose_images, crop, image_size, match_overlap, match_product_overlap, stable
 from .recovery import load_observation, save_observation
 from .rules import normalized
 from .storage import read_json, write_json
@@ -24,6 +24,15 @@ ITEM = NUMBER + r"(?:篇|份|条|部|本|项)(?:药品说明书?|说明书|医�
 TITLE = r"^参考" + ITEM + r"(?:(?:以及|和|及|与|、|\+|&)" + ITEM + r")*$"
 TITLE_HINT = r"^参考[0-9零〇一二三四五六七八九十百两]+(?:篇|份|条|部|本|项).*(?:文献|资料|指南|共识|说明书?|说明)[\s\^∧︿⌃˄∨⌄vVへ~～]*$"
 SOURCE = re.compile(r"^(?:药监局|医学文献|药品说明书?|临床指南|指南|专家共识|期刊)$")
+NON_MONOGRAPH_HEADER_ITEM = re.compile(
+    r"(" + NUMBER + r")(?:篇|份|条|部|本|项)(?!药品说明书?|说明书)(?:医学文献|临床文献|文献|医学资料|临床指南|指南|专家共识)"
+)
+NUMBERED_CITATION_ROW = re.compile(r"^\s*(\d{1,2})\s*[.、．]\s*(.+)$")
+MONOGRAPH_ROW_PATTERN = re.compile(r"(?:_|__|\s)?药品说明书?(?:\s|$)|药监局$")
+MONOGRAPH_TAG_PATTERN = re.compile(r"^(?:药监局|药品说明书?)$")
+CITATION_DETAIL_LOADING = re.compile(r"加载中|正在加载")
+CITATION_DETAIL_ERROR = re.compile(r"加载失败|网络异常|网络错误|重新加载|页面无法访问|内容加载失败")
+CITATION_DETAIL_CUES = re.compile(r"医学文献|临床文献|临床指南|专家共识|医学资料|发布期刊|发布时间|内容摘要|查看资料原文|文献详情|期刊|摘要|上传")
 PRODUCT_TITLE = r"^(?:参考|推荐)药品(?:\s*[（(]?[0-9]+(?:种|个|款)[)）]?)?$"
 PRODUCT_ENTRY = r"^(?:查看(?:全部|所有)(?:参考|推荐)?药品|全部药品|更多药品)\s*(?:[>›〉》»→⟩]\s*)?$"
 GUIDE_HINT = r"^在这里查看[「『“\"]?历史对话[」』”\"]?$"
@@ -376,23 +385,163 @@ def capture_viewport(observation, base):
     return bounds, {"occlusion_checked": True, "viewport_physical": list(bounds), "excluded_controls": [list(box) for box in blockers]}
 
 
-def _reference_count(text):
+def _parse_zh_number(raw):
+    if raw.isdigit():
+        return int(raw)
     digits = {char: index for index, char in enumerate("零一二三四五六七八九")}
     digits.update({"〇": 0, "两": 2})
-    total = 0
-    for raw in re.findall(r"(" + NUMBER + r")(?:篇|份|条|部|本|项)", text):
-        if raw.isdigit():
-            total += int(raw)
+    value, pending = 0, 0
+    for char in raw:
+        if char in digits:
+            pending = digits[char]
+        elif char in "十百":
+            value += (pending or 1) * (10 if char == "十" else 100)
+            pending = 0
+    return value + pending
+
+
+def _reference_count(text):
+    compact = re.sub(r"\s+", "", unicodedata.normalize("NFKC", text or ""))
+    return sum(_parse_zh_number(raw) for raw in re.findall(r"(" + NUMBER + r")(?:篇|份|条|部|本|项)", compact))
+
+
+def _literature_count(text):
+    compact = re.sub(r"\s+", "", unicodedata.normalize("NFKC", text or ""))
+    if _reference_count(compact) == 0:
+        return None
+    return sum(_parse_zh_number(raw) for raw in NON_MONOGRAPH_HEADER_ITEM.findall(compact))
+
+
+def _is_monograph_row(line, all_lines, width):
+    match = NUMBERED_CITATION_ROW.match(_label(line))
+    title = match.group(2).strip() if match else _label(line)
+    if MONOGRAPH_ROW_PATTERN.search(title):
+        return True
+    box = line["bounds"]
+    row_h = max(box[3] - box[1], 1)
+    row_cy = (box[1] + box[3]) / 2
+    for other in all_lines:
+        if other is line:
             continue
-        value, pending = 0, 0
-        for char in raw:
-            if char in digits:
-                pending = digits[char]
-            elif char in "十百":
-                value += (pending or 1) * (10 if char == "十" else 100)
-                pending = 0
-        total += value + pending
-    return total
+        obox = other["bounds"]
+        if obox[0] < box[2] - width * .03:
+            continue
+        other_h = max(obox[3] - obox[1], 1)
+        other_cy = (obox[1] + obox[3]) / 2
+        if abs(other_cy - row_cy) <= max(row_h, other_h) * .85 and MONOGRAPH_TAG_PATTERN.fullmatch(_label(other).strip()):
+            return True
+    return False
+
+
+def citation_detail_rows(observation, viewport, header=None, *, min_index=1, max_total=None):
+    """Parse sequential expanded citation rows and separate literature from drug monographs."""
+    lines = sorted(_ocr(observation), key=lambda item: (item["bounds"][1], item["bounds"][0]))
+    width, height = observation.physical_size
+    try:
+        safe_viewport, _ = capture_viewport(observation, viewport)
+        safe_bottom = safe_viewport[3]
+    except CaptureError:
+        safe_bottom = viewport[3]
+    if header is not None and header["bounds"][3] >= viewport[1]:
+        search_top = header["bounds"][3] - height * .008
+        anchor_x = header["bounds"][0]
+        start_num = 1
+    else:
+        search_top = viewport[1]
+        anchor_x = None
+        start_num = min_index
+    rows, prev_num, prev_bottom = [], None, None
+    for line in lines:
+        box = line["bounds"]
+        if box[1] < search_top or box[3] > viewport[3]:
+            continue
+        if anchor_x is not None and abs(box[0] - anchor_x) > width * .06:
+            continue
+        match = NUMBERED_CITATION_ROW.match(_label(line))
+        if not match:
+            continue
+        num, title = int(match.group(1)), match.group(2).strip()
+        if max_total and num > max_total:
+            break
+        if prev_num is None:
+            if header is not None and header["bounds"][3] >= viewport[1]:
+                if num != 1:
+                    continue
+            elif not (start_num <= num <= start_num + 2):
+                continue
+            anchor_x = box[0] if anchor_x is None else anchor_x
+        else:
+            if num != prev_num + 1 or box[1] - prev_bottom > height * .075:
+                break
+        monograph = _is_monograph_row(line, lines, width)
+        safe = box[1] >= viewport[1] + height * .005 and box[3] <= safe_bottom
+        rows.append({
+            "index": num,
+            "text": _label(line),
+            "title": title,
+            "bounds": tuple(box),
+            "is_monograph": monograph,
+            "safe": safe,
+        })
+        prev_num, prev_bottom = num, box[3]
+    return {
+        "rows": rows,
+        "literature": [row for row in rows if not row["is_monograph"]],
+        "monographs": [row for row in rows if row["is_monograph"]],
+        "max_index": rows[-1]["index"] if rows else 0,
+    }
+
+
+def _citation_detail_loading(observation):
+    if any(node.get("package") in ("", observation.package) and node.get("class_name", "").endswith("ProgressBar")
+           for node in observation.nodes):
+        return True
+    return any(CITATION_DETAIL_LOADING.search(_label(line)) for line in _physical_labels(observation))
+
+
+def _citation_detail_error(observation):
+    if network_error_visible(observation):
+        return True
+    return any(CITATION_DETAIL_ERROR.search(_label(line)) for line in _physical_labels(observation))
+
+
+def _citation_detail_valid(observation, list_title, expected_package):
+    if observation.package != expected_package or answer_page_ready(observation):
+        return False
+    if _citation_detail_loading(observation) or _citation_detail_error(observation):
+        return False
+    w, h = observation.physical_size
+    body_crop = _image(observation.png).crop((0, int(h * .12), w, int(h * .88)))
+    if np.asarray(body_crop, dtype=np.float32).std(axis=(0, 1)).max() < 8.0:
+        return False
+    labels = [_label(line) for line in _physical_labels(observation) if line["bounds"][1] >= h * .06]
+    joined = " ".join(labels)
+    corpus = normalized(joined)
+    if not (CITATION_DETAIL_CUES.search(joined) or len(corpus) >= 40):
+        return False
+    needle = normalized(re.sub(r"[…\.]+$", "", list_title or ""))
+    if len(needle) >= 4:
+        probe = needle[:min(len(needle), 16)]
+        prefix = probe[:min(len(probe), 6)]
+        if prefix not in corpus:
+            windows = any(probe[i:i + 4] in corpus for i in range(max(0, len(probe) - 3)))
+            char_overlap = sum(1 for ch in probe if ch in corpus) / len(probe)
+            if not (windows and char_overlap >= .6):
+                return False
+    return True
+
+
+def _extract_citation_detail_title(observation, list_title):
+    h = observation.physical_size[1]
+    needle = normalized(re.sub(r"[…\.]+$", "", list_title or ""))
+    probe = needle[:min(len(needle), 6)]
+    candidates = [_label(line) for line in _physical_labels(observation)
+                  if h * .10 <= line["bounds"][1] <= h * .28 and 6 <= len(normalized(_label(line))) <= 80]
+    if probe:
+        matched = [text for text in candidates if probe in normalized(text)]
+        if matched:
+            return max(matched, key=lambda text: len(normalized(text)))
+    return list_title
 
 
 def _collapsed_reference_preview(observation, header, lines):
@@ -1070,6 +1219,228 @@ class AnswerCapture:
         self.engine.log("citations_expanded", independent_rows_verified=True)
         return current, verified
 
+    def _safe_leave_citation_detail(self, detail_obs):
+        try:
+            self._return_from_citation_detail(detail_obs)
+        except Exception:
+            pass
+
+    def _wait_citation_detail(self, source_obs, row, tap_point):
+        timeout = self.settle_seconds if self.settle_seconds < 5.0 else max(self.settle_seconds, 18.0)
+        started = self._clock()
+        deadline = started + timeout
+        retry_after = min(3.0, timeout * .35)
+        retried_tap = False
+        entered_detail = False
+        last_obs = source_obs
+        while self._clock() < deadline:
+            obs = self.device.observe(ocr=False)
+            self._last = obs
+            last_obs = obs
+            if obs.package != self.package:
+                raise CaptureError(f"点击参考文献第{row['index']}篇后前台应用发生变化，已停止采集")
+            validate_geometry(obs.logical_size, obs.physical_size)
+            if (tuple(obs.logical_size), tuple(obs.physical_size)) != self.geometry:
+                raise CaptureError(f"点击参考文献第{row['index']}篇后窗口尺寸变化，停止采集")
+            still_chat = obs.activity == source_obs.activity and answer_page_ready(obs)
+            if still_chat:
+                if not retried_tap and self._clock() - started >= retry_after and stable(source_obs.png, obs.png, bounds=self.viewport):
+                    self.device.tap(tap_point, expected_package=self.package)
+                    retried_tap = True
+                self._sleep(.3)
+                continue
+            entered_detail = True
+            w, h = obs.physical_size
+            content_bounds = (0, int(h * .06), w, int(h * .96))
+            body_std = np.asarray(_image(obs.png).crop((0, int(h * .12), w, int(h * .88))), dtype=np.float32).std(axis=(0, 1)).max()
+            if body_std < 8.0:
+                self._sleep(.3)
+                continue
+            self.device.recognize(obs)
+            if hasattr(self.engine, "decorate"):
+                obs = self.engine.decorate(obs)
+            self._last = obs
+            last_obs = obs
+            if _citation_detail_error(obs):
+                self._save(f"citation-detail-{row['index']:02d}-error", obs)
+                self._safe_leave_citation_detail(obs)
+                self._last = obs
+                raise CaptureError(f"参考文献第{row['index']}篇详情页加载异常，拒绝交付异常截图")
+            if _citation_detail_valid(obs, row["title"], self.package):
+                self._sleep(.25)
+                probe = self.device.screenshot()
+                if stable(obs.png, probe, bounds=content_bounds):
+                    return obs
+                continue
+            self._sleep(.3)
+        self._save(f"citation-detail-{row['index']:02d}-timeout", last_obs)
+        if entered_detail:
+            self._safe_leave_citation_detail(last_obs)
+        self._last = last_obs
+        if not entered_detail:
+            raise CaptureError(f"点击参考文献第{row['index']}篇后未能进入详情页")
+        raise CaptureError(f"参考文献第{row['index']}篇详情页超时未完成加载或标题不匹配")
+
+    def _return_from_citation_detail(self, detail_obs):
+        timeout = max(self.settle_seconds, 1.0)
+        started = self._clock()
+        deadline = started + timeout
+        retry_after = min(3.0, timeout * .35)
+        self.device.press("back", expected_package=self.package)
+        retried_back = False
+        while self._clock() < deadline:
+            self._sleep(.3)
+            obs = self.device.observe(ocr=True)
+            if hasattr(self.engine, "decorate"):
+                obs = self.engine.decorate(obs)
+            self._last = obs
+            if obs.package != self.package:
+                raise CaptureError("从参考文献详情返回后前台应用发生变化")
+            validate_geometry(obs.logical_size, obs.physical_size)
+            if (tuple(obs.logical_size), tuple(obs.physical_size)) != self.geometry:
+                raise CaptureError("从参考文献详情返回后窗口尺寸发生变化")
+            back_in_answer = answer_page_ready(obs) and (self.answer_page_check is None or self.answer_page_check(obs))
+            if back_in_answer:
+                return self._settled(obs)
+            if not retried_back and self._clock() - started >= retry_after:
+                self.device.press("back", expected_package=self.package)
+                retried_back = True
+        raise CaptureError("查看参考文献详情后未能返回原回答页")
+
+    def _capture_citation_details(self, current, question, citations):
+        if self.engine.state.get("entry") != "douyin-direct":
+            return current, None
+        if not citations.get("present") or not citations.get("header"):
+            return current, {"required": False, "present": False, "complete": True, "header": None,
+                             "expected_count": 0, "skipped_monographs": 0, "items": [], "image_paths": []}
+        canonical = citations["header"]["canonical"]
+        expected_lit = _literature_count(canonical)
+        total_refs = _reference_count(canonical)
+        debug_root = self.attempt.parent
+        identity = [question, self.package, self.engine.state.get("entry"), self.engine.state.get("index")]
+
+        # Reuse valid detail observations already captured for this question before a pause.
+        captured_by_index = {}
+        prepared = self.engine.state.get("capture_preparation") or {}
+        saved_cd = prepared.get("citation_details") if prepared.get("identity") == identity else None
+        if isinstance(saved_cd, dict) and saved_cd.get("header") == canonical:
+            for item in saved_cd.get("items", []):
+                try:
+                    obs_path = Path(item["observation"]).resolve()
+                    if not obs_path.is_relative_to(debug_root):
+                        continue
+                    saved_obs = load_observation(obs_path)
+                    if _citation_detail_valid(saved_obs, item.get("list_title", ""), self.package):
+                        captured_by_index[int(item["index"])] = dict(item)
+                except (OSError, KeyError, TypeError, ValueError):
+                    continue
+
+        def persist_progress():
+            ordered = [captured_by_index[idx] for idx in sorted(captured_by_index)]
+            prep = self.engine.state.get("capture_preparation")
+            if not isinstance(prep, dict) or prep.get("identity") != identity:
+                prep = {"identity": identity, "stage": "citations"}
+            prep["citation_details"] = {"header": canonical, "expected_count": expected_lit, "items": ordered}
+            self.engine.state["capture_preparation"] = prep
+            self.engine.save()
+
+        self.engine.state["capture_objective"] = "citation.details"
+        parsed = citation_detail_rows(current, self.viewport, citations["header"], max_total=total_refs or None)
+        if expected_lit == 0 and not parsed["literature"]:
+            return current, {"required": False, "present": False, "complete": True, "header": canonical,
+                             "expected_count": 0, "skipped_monographs": len(parsed["monographs"]),
+                             "items": [], "image_paths": []}
+
+        seen_monographs = {row["index"] for row in parsed["monographs"]}
+        max_seen_index = parsed["max_index"]
+        scrolled = False
+
+        for _ in range(7):
+            live_citations = citation_state(current, self.viewport, canonical)
+            header = live_citations["header"] if live_citations.get("present") else None
+            parsed = citation_detail_rows(
+                current, self.viewport, header,
+                min_index=max(1, max_seen_index - 1) if header is None else 1,
+                max_total=total_refs or None,
+            )
+            seen_monographs.update(row["index"] for row in parsed["monographs"])
+            max_seen_index = max(max_seen_index, parsed["max_index"])
+
+            while True:
+                live_citations = citation_state(current, self.viewport, canonical)
+                header = live_citations["header"] if live_citations.get("present") else None
+                parsed = citation_detail_rows(
+                    current, self.viewport, header,
+                    min_index=max(1, max_seen_index - 1) if header is None else 1,
+                    max_total=total_refs or None,
+                )
+                seen_monographs.update(row["index"] for row in parsed["monographs"])
+                max_seen_index = max(max_seen_index, parsed["max_index"])
+                pending_rows = [row for row in parsed["literature"] if row["index"] not in captured_by_index]
+                if not pending_rows or not pending_rows[0]["safe"]:
+                    break
+                row = pending_rows[0]
+                box = row["bounds"]
+                tap_px = (box[0] + min((box[2] - box[0]) * .35, current.physical_size[0] * .35), (box[1] + box[3]) / 2)
+                tap_logical = physical_to_logical(tap_px, current.physical_size, current.logical_size)
+                self.engine.log("citation_detail_open", index=row["index"], title=row["title"])
+                self.device.tap(tap_logical, expected_package=self.package)
+                detail_obs = self._wait_citation_detail(current, row, tap_logical)
+                obs_dir = self._save(f"citation-detail-{row['index']:02d}", detail_obs)
+                item = {
+                    "index": row["index"],
+                    "list_title": row["title"],
+                    "detail_title": _extract_citation_detail_title(detail_obs, row["title"]),
+                    "observation": obs_dir,
+                    "activity": detail_obs.activity,
+                }
+                captured_by_index[row["index"]] = item
+                persist_progress()
+                self.engine.log("citation_detail_captured", index=row["index"], title=row["title"],
+                                detail_title=item["detail_title"], activity=detail_obs.activity, observation=obs_dir)
+                current = self._return_from_citation_detail(detail_obs)
+                current = self._refresh_answer_viewport(current)
+
+            if expected_lit is not None and len(captured_by_index) >= expected_lit:
+                break
+            if expected_lit is None and seen_monographs and all(row["index"] in captured_by_index for row in parsed["literature"]):
+                break
+            if total_refs > 0 and max_seen_index >= total_refs and all(row["index"] in captured_by_index for row in parsed["literature"]):
+                break
+            self._swipe("down", .32)
+            after = self._settled()
+            if stable(self._region(current), self._region(after)):
+                break
+            current = after
+            scrolled = True
+
+        items = [captured_by_index[idx] for idx in sorted(captured_by_index)]
+        if expected_lit is not None and expected_lit > 0 and len(items) < expected_lit:
+            raise CaptureError(f"展开的医学文献应采集{expected_lit}篇详情截图，实际仅完成{len(items)}篇")
+        if expected_lit is None and not items and not seen_monographs:
+            raise CaptureError("已展开引用但未能识别或采集文献详情截图")
+
+        if scrolled:
+            for step in range(8):
+                if direct_question_bubble(current, question, self.viewport):
+                    break
+                self._swipe("up", .35, step > 0)
+                current = self._settled()
+            current, _ = self._position(current, question)
+            current = self._refresh_answer_viewport(current)
+
+        details = {
+            "required": bool(items),
+            "present": bool(items),
+            "complete": True,
+            "header": canonical,
+            "expected_count": expected_lit if expected_lit is not None else len(items),
+            "skipped_monographs": len(seen_monographs),
+            "items": items,
+            "image_paths": [],
+        }
+        return current, details
+
     def _checkpoint_products(self, checkpoint):
         checkpoint["counter"] = self.counter
         self.engine.state["products_resume"] = checkpoint
@@ -1296,12 +1667,17 @@ class AnswerCapture:
             current = append(current)
         unchanged = 0
         conservative = self.engine.state.get("entry") == "douyin-direct"
+        had_seam_retry = False
         while unchanged < (2 if checkpoint["moved"] else 3):
             started = self._clock()
             if conservative:
-                # Tall horizontal medicine cards must enter one viewport in full;
-                # a slow, short drag also avoids fling-dependent missing frames.
-                distance = self._swipe("down", .35, alternate=unchanged > 0, duration=.9)
+                has_carousel = bool(product_carousels(current, self.viewport, include_static=False))
+                if has_carousel or had_seam_retry:
+                    # Tall horizontal medicine cards must enter one viewport in full;
+                    # a slow, short drag also avoids fling-dependent missing frames.
+                    distance = self._swipe("down", .35, alternate=unchanged > 0, duration=.9)
+                else:
+                    distance = self._swipe("down", .48, alternate=unchanged > 0, duration=.55)
             else:
                 distance = self._swipe("down", self._stride(seams), alternate=unchanged > 0)
             after, boxes = self._drawer_ready(self._settled())
@@ -1315,7 +1691,11 @@ class AnswerCapture:
                 current = after
                 continue
             unchanged = 0
-            current = append(after, distance, started)
+            try:
+                current = append(after, distance, started)
+            except CaptureError:
+                had_seam_retry = True
+                raise
             current = carousels.capture_visible(current)
         current = carousels.capture_visible(current, final=True)
         self.engine.log("products_capture_complete", frames=len(frames), end_probes=unchanged, terminal_sequence=True)
@@ -1349,38 +1729,65 @@ class AnswerCapture:
                 pending = self.engine.state.get("pending_request")
                 question_pending = bool(pending and read_json(Path(pending)).get("step") == "capture.question_top")
                 question_pending = question_pending or self.engine.state.get("exploration", {}).get("step") == "capture.question_top"
+                reused_direct = False
                 if question_pending:
                     if (not prepared or prepared.get("stage") != "question" or prepared["identity"] != identity
                             or (tuple(prior.logical_size), tuple(prior.physical_size)) != self.geometry):
                         raise CaptureError("原题首屏恢复缺少本题生成确认断点，不能跳过完成检查")
                     self.engine.log("question_goal_resumed", generation_rescan=False)
                 else:
-                    self.engine.state["capture_objective"] = "capture.generation"
-                    current = self._complete(current, question)
-                    current = self._refresh_answer_viewport(current)
-                    self.engine.state["capture_preparation"] = {
-                        "identity": identity, "stage": "question", "observation": self._save("generation-confirmed", current),
-                        "viewport_physical": list(self.viewport)}
-                    self.engine.save()
-                self.engine.state["capture_objective"] = "capture.question_top"
-                self._question_method_used = False
-                current, _ = self._question_start(current, question)
-                if self._question_method_used and not self.engine.state["capture_preparation"].get("question_confirmed"):
-                    # A route may have left a different answer. Its old generation
-                    # evidence cannot certify the answer whose exact question we just found.
-                    self.engine.state["capture_preparation"] = {
-                        "identity": identity, "stage": "generation", "observation": self._save("question-verified", current)}
-                    self.engine.state["capture_objective"] = "capture.generation"
-                    self.engine.save()
-                    current = self._complete(current, question)
-                    current = self._refresh_answer_viewport(current)
-                    self.engine.state["capture_preparation"] = {
-                        "identity": identity, "stage": "question", "question_confirmed": True,
-                        "observation": self._save("generation-confirmed", current), "viewport_physical": list(self.viewport)}
+                    if self.engine.state.get("entry") == "douyin-direct":
+                        from .platforms import douyin_direct
+                        task = next((item for item in self.engine.state.get("tasks", [])
+                                     if (item.get("entry"), item.get("index"), item.get("text"))
+                                     == ("douyin-direct", self.engine.state.get("index"), question)), None)
+                        proof = douyin_direct.submission_evidence(task, self.engine.run_dir) if task else None
+                        if proof and proof.get("question_observation") and proof.get("latest_tail"):
+                            try:
+                                confirmed_q = load_observation(proof["question_observation"])
+                                if (confirmed_q.package == current.package
+                                        and (tuple(confirmed_q.logical_size), tuple(confirmed_q.physical_size)) == self.geometry
+                                        and stable(confirmed_q.png, current.png, bounds=self.viewport)
+                                        and direct_question_bubble(current, question, self.viewport) is not None):
+                                    self.engine.log("direct_submission_preparation_reused",
+                                                    generation_rescan=False, top_rescan=False,
+                                                    latest_tail=proof["latest_tail"])
+                                    current, _ = self._position(current, question)
+                                    reused_direct = True
+                            except (OSError, KeyError, TypeError, ValueError):
+                                reused_direct = False
+                    if not reused_direct:
+                        self.engine.state["capture_objective"] = "capture.generation"
+                        current = self._complete(current, question)
+                        current = self._refresh_answer_viewport(current)
+                        self.engine.state["capture_preparation"] = {
+                            "identity": identity, "stage": "question", "observation": self._save("generation-confirmed", current),
+                            "viewport_physical": list(self.viewport)}
+                        self.engine.save()
+                if not reused_direct:
                     self.engine.state["capture_objective"] = "capture.question_top"
-                    self.engine.save()
+                    self._question_method_used = False
                     current, _ = self._question_start(current, question)
-            self.engine.state["capture_preparation"] = {"identity": identity, "stage": "citations", "observation": self._save("prepared-top", current)}
+                    if self._question_method_used and not self.engine.state["capture_preparation"].get("question_confirmed"):
+                        # A route may have left a different answer. Its old generation
+                        # evidence cannot certify the answer whose exact question we just found.
+                        self.engine.state["capture_preparation"] = {
+                            "identity": identity, "stage": "generation", "observation": self._save("question-verified", current)}
+                        self.engine.state["capture_objective"] = "capture.generation"
+                        self.engine.save()
+                        current = self._complete(current, question)
+                        current = self._refresh_answer_viewport(current)
+                        self.engine.state["capture_preparation"] = {
+                            "identity": identity, "stage": "question", "question_confirmed": True,
+                            "observation": self._save("generation-confirmed", current), "viewport_physical": list(self.viewport)}
+                        self.engine.state["capture_objective"] = "capture.question_top"
+                        self.engine.save()
+                        current, _ = self._question_start(current, question)
+            saved_cd = prepared.get("citation_details") if isinstance(prepared, dict) and prepared.get("identity") == identity else None
+            self.engine.state["capture_preparation"] = {
+                "identity": identity, "stage": "citations", "observation": self._save("prepared-top", current),
+                **({"citation_details": saved_cd} if saved_cd else {}),
+            }
             self.engine.save()
             teaching = getattr(self.engine, "teach", set()) & {"page.perception", "page.perception." + self.engine.state.get("entry", "")}
             if teaching:
@@ -1393,12 +1800,23 @@ class AnswerCapture:
             current, target = self._position(current, question)
             if citations["present"] and not citation_state(current, self.viewport, citations["header"]["canonical"])["expanded"]:
                 raise CaptureError("首帧位置调整后不能确认引用仍完整展开")
+            self.engine.state["capture_preparation"] = {
+                "identity": identity, "stage": "citations",
+                "observation": self._save("citations-expanded", current),
+                **({"citation_details": saved_cd} if saved_cd else {}),
+            }
+            self.engine.save()
+            current, citation_details = self._capture_citation_details(current, question, citations)
+            if citation_details and citation_details.get("present"):
+                current, target = self._position(current, question)
+                if citations["present"] and not citation_state(current, self.viewport, citations["header"]["canonical"])["expanded"]:
+                    raise CaptureError("采集参考文献详情返回后不能确认引用仍完整展开")
             first_viewport, first_info = capture_viewport(current, self.viewport)
             first_bounds = (first_viewport[0], max(first_viewport[1], target["bounds"][1] - current.physical_size[1] * .006), first_viewport[2], first_viewport[3])
             frame_file = self.attempt / "frame-001.png"
             frame_file.write_bytes(crop(current.png, first_bounds))
             checkpoint = {"question": question, "package": self.package, "entry": self.engine.state.get("entry"), "index": self.engine.state.get("index"),
-                          "attempt": str(self.attempt), "frame_files": [str(frame_file)], "seams": [], "citations": citations, "target": target,
+                          "attempt": str(self.attempt), "frame_files": [str(frame_file)], "seams": [], "citations": citations, "citation_details": citation_details, "target": target,
                           "frame_viewports": [{**first_info, "viewport_physical": list(first_bounds)}], "products": product_state(current, self.viewport),
                           "geometry": {"logical_size": list(self.geometry[0]), "physical_size": list(self.geometry[1]), "viewport_physical": list(self.viewport)},
                           "last_observation": self._save("first-frame", current), "counter": self.counter}
@@ -1409,6 +1827,7 @@ class AnswerCapture:
         self.engine.state["capture_objective"] = "capture.body"
         frame_files, seams, frame_viewports = checkpoint["frame_files"], checkpoint["seams"], checkpoint["frame_viewports"]
         citations, target, products = checkpoint["citations"], checkpoint["target"], checkpoint["products"]
+        citation_details = checkpoint.get("citation_details")
         resume_after = self._settled(current) if resumed else None
         if resumed:
             current = load_observation(checkpoint["last_observation"])
@@ -1474,6 +1893,7 @@ class AnswerCapture:
                          "question_visible": target.get("question_visible", True), "answer_start": target,
                          "citation_confirmation_method": citations.get("method", "builtin"),
                          "citations_checked": True, "citations_found": citations["present"], "citations_expanded": citations["expanded"],
+                         **({"citation_details": citation_details} if citation_details is not None else {}),
                          "completion_confirmed": True, "answer_content_confirmed": True, "end_confirmed": True, "frame_count": len(frames), "seams": seams,
                          "occlusion_checked": True, "frame_viewports": frame_viewports,
                          "frame_files": frame_files, "products": products,
@@ -1631,6 +2051,16 @@ class AnswerCapture:
                     elif prefix == "回答_参考药品_横向":
                         horizontal_paths.append(str(destination))
             metadata["image_paths"] = paths
+            citation_details = metadata.get("citation_details")
+            if isinstance(citation_details, dict) and citation_details.get("items"):
+                citation_detail_paths = []
+                for seq, item in enumerate(citation_details["items"], 1):
+                    destination = delivery / f"回答_参考文献_{seq:03d}.png"
+                    destination.write_bytes((Path(item["observation"]) / "screen.png").read_bytes())
+                    item["image_path"] = str(destination)
+                    citation_detail_paths.append(str(destination))
+                    paths.append(str(destination))
+                citation_details["image_paths"] = citation_detail_paths
             source = self._search_source(question)
             if source:
                 destination = delivery / "搜索结果.png"
@@ -1750,6 +2180,40 @@ def verify_capture_images(result, debug, delivery):
                 or output.read_bytes() != observation.png):
             raise CaptureError("搜索原题、入口或交付截图与原始观察不符")
         source_paths.append(str(output))
+    citation_details = result.get("citation_details")
+    citation_detail_paths = []
+    if (debug.parent.name == "douyin-direct" or result.get("entry") == "douyin-direct") and result.get("citations_found"):
+        if not isinstance(citation_details, dict) or citation_details.get("complete") is not True:
+            raise CaptureError("抖音小程序入口缺少参考文献详情验证证据")
+    if citation_details is not None:
+        if not isinstance(citation_details, dict) or not isinstance(citation_details.get("present"), bool) or citation_details.get("complete") is not True:
+            raise CaptureError("参考文献详情记录格式无效或未完成")
+        if citation_details.get("present"):
+            items = citation_details.get("items")
+            cd_paths = citation_details.get("image_paths")
+            if (not isinstance(items, list) or not items or not isinstance(cd_paths, list)
+                    or len(items) != len(cd_paths) or len(set(cd_paths)) != len(cd_paths)):
+                raise CaptureError("参考文献详情图片清单不完整或重复")
+            expected_count = citation_details.get("expected_count", 0)
+            if type(expected_count) is not int or (expected_count > 0 and len(items) < expected_count):
+                raise CaptureError("参考文献详情数量少于引用标题声明篇数")
+            if not set(cd_paths).issubset(paths) or set(cd_paths) & set(product_paths + horizontal_paths + source_paths):
+                raise CaptureError("参考文献详情图片清单不属于本题或与其他图片重复")
+            expected_pkg = "com.ss.android.ugc.aweme" if (debug.parent.name == "douyin-direct" or result.get("entry") == "douyin-direct") else None
+            for seq, (item, out_path) in enumerate(zip(items, cd_paths), 1):
+                if not isinstance(item, dict) or not isinstance(item.get("observation"), str):
+                    raise CaptureError("参考文献详情观察路径缺失")
+                obs_dir = Path(item["observation"]).resolve()
+                output = Path(out_path).resolve()
+                if (not obs_dir.is_relative_to(debug) or output != delivery / f"回答_参考文献_{seq:03d}.png"
+                        or item.get("image_path") != str(output)):
+                    raise CaptureError("参考文献详情证据或交付路径无效")
+                detail_obs = load_observation(obs_dir)
+                if output.read_bytes() != detail_obs.png:
+                    raise CaptureError("参考文献详情交付截图与原始观察不一致")
+                if not _citation_detail_valid(detail_obs, item.get("list_title", ""), expected_pkg or detail_obs.package):
+                    raise CaptureError("参考文献详情原始观察未通过有效内容检查")
+            citation_detail_paths = list(cd_paths)
     if result.get("question_visible") is False:
         target = result.get("answer_start", {})
         evidence = target.get("top_observations", [])
@@ -1770,7 +2234,7 @@ def verify_capture_images(result, debug, delivery):
         first = crop(observations[-1].png, result["frame_viewports"][0]["viewport_physical"])
         if _image(first).tobytes() != _image(Path(result["frame_files"][0]).read_bytes()).tobytes():
             raise CaptureError("首帧不对应已验证的回答顶部")
-    groups = [(result, [path for path in paths if path not in product_paths + horizontal_paths + source_paths])]
+    groups = [(result, [path for path in paths if path not in product_paths + horizontal_paths + source_paths + citation_detail_paths])]
     if drawer:
         groups.append((products, product_paths))
     for metadata, outputs in groups:
@@ -1794,14 +2258,13 @@ def verify_capture_images(result, debug, delivery):
             if measured["overlap"] != seam["overlap"] or image_size(frames[index + 1])[1] <= measured["overlap"]:
                 raise CaptureError("记录的接缝与原始帧不一致")
             overlaps.append(measured["overlap"])
-        expected = compose(frames, overlaps)
+        expected = compose_images(frames, overlaps)
         if len(expected) != len(outputs):
             raise CaptureError("交付图片数量与原始帧拼接结果不一致")
-        for file, png in zip(outputs, expected):
+        for file, rebuilt in zip(outputs, expected):
             path = Path(file).resolve()
             if not path.is_relative_to(delivery) or path.suffix != ".png":
                 raise CaptureError("正式图片不属于本题交付目录")
-            rebuilt = _image(png)
             with Image.open(path) as actual:
                 if (actual.format != "PNG" or actual.size != rebuilt.size
                         or actual.convert("RGBA").tobytes() != rebuilt.convert("RGBA").tobytes()):

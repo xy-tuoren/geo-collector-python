@@ -1,34 +1,49 @@
 # Geo Collector 安装与首次使用
 
-## 推荐：通过 PyPI 安装 CLI 和配套 Skill
+## 最简单上手：直接发给本地 Agent 一句话（免手敲命令）
 
-其他用户需要：本地 Agent（能执行终端命令、读文件和看截图）、[uv](https://docs.astral.sh/uv/getting-started/installation/)、安卓手机。CLI 与配套 Skill 打包在同一个 wheel 中，不需要下载源码，也不需要额外模型或 API Key。
+如果用户已有本地 Agent（Claude Code、Codex、Cursor、Antigravity / Gemini CLI 等，能执行终端命令、读文件和看截图），把下面这段话直接发给 Agent 即可完成安装、Skill 托管与手机连接自检（需要安卓手机；无需源码、额外模型或 API Key）：
 
-### 1. 首次安装（PyPI 发布后）
+> 帮我安装并配置 `xiaohe-geo-collector`（Python 3.11，国内请用清华镜像 `https://pypi.tuna.tsinghua.edu.cn/simple`；如缺少 `uv` 或 `adb` 请顺手帮我装好），然后运行 `geo-collect setup --agent <codex|claude-code|cursor|antigravity>` 安装配套 Skill，最后运行 `geo-collect doctor` 帮我检查手机连接。
 
-uv 会自动准备 Python 3.11 和依赖；第二条将 Skill 安装到所选 Agent 的用户目录：
+（也可直接把 `.agents/skills/geo-collector` 文件夹放进用户的 Agent Skills 目录；Skill 已内置安装、升级与按需加载的排障指引，用户直接在对话里说“帮我安装并采集”即可由 Agent 自动完成安装。）
+
+## 终端一键安装 CLI 和配套 Skill
+
+CLI、配套 `SKILL.md` 与按需排障参考 `references/install.md` 打包在同一个 PyPI wheel 中（包名 `xiaohe-geo-collector`）。
+
+### 1. 首次安装
+
+uv 会自动准备 Python 3.11 和依赖；第二条将 Skill（含 `references/install.md`）安装到所选 Agent 的用户目录：
 
 ```sh
-# 国际网络
-uv tool install --python 3.11 xiaohe-geo-collector && geo-collect setup --agent codex
-
 # 国内网络推荐加清华镜像（首次下载 onnxruntime/opencv 更快）
 uv tool install --python 3.11 --default-index https://pypi.tuna.tsinghua.edu.cn/simple xiaohe-geo-collector && geo-collect setup --agent codex
+
+# 国际网络
+uv tool install --python 3.11 xiaohe-geo-collector && geo-collect setup --agent codex
 ```
 
-Claude Code 用户把 `codex` 换成 `claude-code`，Cursor 用户换成 `cursor`。Windows PowerShell 5 不支持 `&&`，请拆成两行分别执行。如果 uv 提示工具目录不在 PATH，先执行 `uv tool update-shell` 并重新打开终端或本地 Agent，再运行 `geo-collect setup`。
+`--agent` 可选值：
+- `codex` → `~/.agents/skills/geo-collector/`
+- `claude-code` → `~/.claude/skills/geo-collector/`（尊重 `CLAUDE_CONFIG_DIR`）
+- `cursor` → `~/.cursor/skills/geo-collector/`
+- `antigravity`（或别名 `gemini`）→ `~/.gemini/skills/geo-collector/`
 
-> 若维护者尚未发布首个 PyPI 版本，或处于离线/内网环境，也可直接把包名替换成 GitHub Release 提供的 wheel 路径或下载地址（如 `./xiaohe_geo_collector-0.1.2-py3-none-any.whl`）。
+Windows PowerShell 5 不支持 `&&`，请拆成两行分别执行。如果 uv 提示工具目录不在 PATH，先执行 `uv tool update-shell` 并重新打开终端或本地 Agent，再运行 `geo-collect setup`。
+
+> 处于离线/内网环境时，也可把包名替换成 GitHub Release 提供的本地 wheel 路径（如 `./xiaohe_geo_collector-0.1.4-py3-none-any.whl`）。
 
 ### 2. 一键更新（同时升级 CLI 与配套 Skill）
 
-维护者发布新版本后，已安装用户只需一条命令即可升级 CLI，并自动刷新本机所有已安装的受管 Agent Skill（不影响各自工作目录里的 `.geo-collector/rules.json`、`lessons.json` 和 `captures/`）：
+维护者发布新版本后，已安装用户只需一条命令即可升级 CLI，并自动刷新本机所有已安装的受管 Agent Skill（不影响各自工作目录里的 `.geo-collector/rules.json`、`lessons.json` 和 `captures/`）；也可以直接在对话里让 Agent 执行升级：
 
 ```sh
-geo-collect upgrade
-
 # 国内网络使用清华或阿里镜像加速
 geo-collect upgrade --mirror tuna
+
+# 国际网络
+geo-collect upgrade
 ```
 
 也可以手动分步执行：
@@ -41,9 +56,9 @@ uv tool upgrade xiaohe-geo-collector && geo-collect setup --installed
 
 > 使用 geo-collector 采集这些问题，入口为小荷 App、抖音搜索、头条搜索和抖音小程序直问：[问题列表]。先检查手机连接，遇到异常自行检查、修复并恢复原批次，验收后给我交付图片和逐题结果。
 
-用户无需手动创建 Skill 或填写修复 JSON。需要登录、解锁或授权 USB 调试时，Agent 会在当前对话中请求协助。Skill 提供采集、自愈和验收流程，必须由正在运行的本地 Agent 读取和执行。
+用户无需手动创建 Skill 或填写修复 JSON。需要登录、解锁或授权 USB 调试时，Agent 会在当前对话中请求协助。Skill 提供安装自检、采集、自愈和验收流程，必须由正在运行的本地 Agent 读取和执行。
 
-`setup` 默认安装到当前用户；`--scope project` 仅安装到当前目录；`--installed` 一键刷新本机全部由 `geo-collector` 托管的 Skill；`--dry-run` 可查看目标而不写文件。Codex 使用 `.agents/skills/geo-collector/SKILL.md`，Claude Code 使用 `.claude/skills/geo-collector/SKILL.md`，Cursor 使用 `.cursor/skills/geo-collector/SKILL.md`；用户范围位于用户主目录，项目范围位于当前目录。Claude Code 用户范围也尊重 `CLAUDE_CONFIG_DIR`。用户自行改过的同名 Skill 会被保留并报告冲突，符号链接部署应通过原 Skill 管理工具更新。
+`setup` 默认安装到当前用户；`--scope project` 仅安装到当前目录；`--installed` 一键刷新本机全部由 `geo-collector` 托管的 Skill；`--dry-run` 可查看目标而不写文件。用户自行改过的同名 Skill 或附属文件会被保留并报告冲突，符号链接部署应通过原 Skill 管理工具更新。
 
 ## 维护者：自动发布到 PyPI 与 GitHub Release
 

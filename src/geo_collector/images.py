@@ -14,9 +14,9 @@ class CaptureError(ValueError):
     """The supplied frames cannot establish a safe capture."""
 
 
-@lru_cache(maxsize=4)
+@lru_cache(maxsize=16)
 def _image(png: bytes) -> Image.Image:
-    # Read-only shared images; four frames bound memory while reusing PNG decoding.
+    # Read-only shared images; sixteen frames bound memory while reusing PNG decoding.
     try:
         with Image.open(BytesIO(png)) as source:
             if source.format != "PNG":
@@ -29,7 +29,7 @@ def _image(png: bytes) -> Image.Image:
 
 def _png(image: Image.Image) -> bytes:
     output = BytesIO()
-    image.save(output, format="PNG")
+    image.save(output, format="PNG", compress_level=1)
     return output.getvalue()
 
 
@@ -103,6 +103,7 @@ def _unique_content_anchors(first: Image.Image, second: Image.Image, overlap: in
     import cv2
 
     arrays = [np.asarray(image) for image in (first, second)]
+    grays = [cv2.cvtColor(array, cv2.COLOR_RGB2GRAY) for array in arrays]
     height = max(48, round(min(first.height, second.height) * .10))
     shift = first.height - overlap
     anchors = []
@@ -114,15 +115,16 @@ def _unique_content_anchors(first: Image.Image, second: Image.Image, overlap: in
         patch = arrays[1][offset:offset + height]
         if float(patch.std()) < 20:
             continue
+        gray_patch = grays[1][offset:offset + height]
         patch16 = patch.astype(np.int16)
         unique = True
-        for array, expected in zip(arrays, (shift + offset, offset)):
-            # Any block whose RGB max difference <= 18 and mean <= 2 has
-            # mean-square difference <= 36. Search every original vertical
-            # position, then verify all possible matches in original RGB.
-            errors = cv2.matchTemplate(array, patch, cv2.TM_SQDIFF).ravel() / patch.size
+        for array, gray, expected in zip(arrays, grays, (shift + offset, offset)):
+            # If every channel diff <= 18 and RGB mean diff <= 2, grayscale
+            # mean-square diff is bounded by 36; filter in 1-channel gray with
+            # margin, then verify every candidate in exact original RGB.
+            errors = cv2.matchTemplate(gray, gray_patch, cv2.TM_SQDIFF).ravel() / gray_patch.size
             positions = []
-            for y in np.flatnonzero(errors <= 36.25):
+            for y in np.flatnonzero(errors <= 40.0):
                 difference = np.abs(array[y:y + height].astype(np.int16) - patch16)
                 if difference.max() <= 18 and float(difference.mean()) <= 2:
                     positions.append(int(y))
@@ -138,14 +140,8 @@ def _unique_content_anchors(first: Image.Image, second: Image.Image, overlap: in
     return []
 
 
-def match_overlap(previous: bytes, current: bytes, expected_shift: float | None = None, *, unique_content: bool = False) -> dict:
-    """Return a verified suffix/prefix seam; score is confidence (1 is best).
-
-    ``shift`` is previous-frame height minus overlap, including when the first
-    frame was cropped. The requested gesture distance is only a search hint,
-    never evidence that authorizes cropping. Ambiguous seams raise CaptureError.
-    """
-    first, second = _image(previous), _image(current)
+def _match_overlap_images(first: Image.Image, second: Image.Image, expected_shift: float | None = None, *, unique_content: bool = False) -> dict:
+    """Core overlap verification operating directly on decoded RGB images."""
     if first.width != second.width:
         raise CaptureError("Adjacent frames have different widths")
     if expected_shift is not None and (not isfinite(expected_shift) or expected_shift < 0):
@@ -234,6 +230,16 @@ def match_overlap(previous: bytes, current: bytes, expected_shift: float | None 
     return result
 
 
+def match_overlap(previous: bytes, current: bytes, expected_shift: float | None = None, *, unique_content: bool = False) -> dict:
+    """Return a verified suffix/prefix seam; score is confidence (1 is best).
+
+    ``shift`` is previous-frame height minus overlap, including when the first
+    frame was cropped. The requested gesture distance is only a search hint,
+    never evidence that authorizes cropping. Ambiguous seams raise CaptureError.
+    """
+    return _match_overlap_images(_image(previous), _image(current), expected_shift, unique_content=unique_content)
+
+
 def match_product_overlap(previous: bytes, current: bytes, expected_shift: float | None = None) -> dict:
     """Verify medicine seams using unique pixels rather than common card footers."""
     result = match_overlap(previous, current, expected_shift, unique_content=True)
@@ -247,7 +253,7 @@ def match_product_overlap(previous: bytes, current: bytes, expected_shift: float
     return result
 
 
-def compose(frames: list[bytes], overlaps: list[int], max_height: int = 16000) -> list[bytes]:
+def compose_images(frames: list[bytes], overlaps: list[int], max_height: int = 16000) -> list[Image.Image]:
     if not frames or len(overlaps) != len(frames) - 1:
         raise CaptureError("Composition requires one fewer overlap than frames")
     if isinstance(max_height, bool) or not isinstance(max_height, int) or max_height <= 0:
@@ -269,9 +275,13 @@ def compose(frames: list[bytes], overlaps: list[int], max_height: int = 16000) -
             start += amount
             used += amount
             if used == max_height:
-                result.append(_png(canvas))
+                result.append(canvas)
                 canvas = Image.new("RGB", (width, max_height))
                 used = 0
     if used:
-        result.append(_png(canvas.crop((0, 0, width, used))))
+        result.append(canvas.crop((0, 0, width, used)))
     return result
+
+
+def compose(frames: list[bytes], overlaps: list[int], max_height: int = 16000) -> list[bytes]:
+    return [_png(image) for image in compose_images(frames, overlaps, max_height)]

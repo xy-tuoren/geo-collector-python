@@ -15,7 +15,7 @@ from .storage import DeviceLease, event_output, read_json, write_json
 
 
 def parser():
-    from .setup import MIRRORS, package_version
+    from .setup import MIRRORS, SUPPORTED_AGENTS, package_version
 
     root = argparse.ArgumentParser(description="Python 手机采集：规则自动运行，当前 Agent 按需修复，无额外模型配置。")
     root.add_argument("--version", action="version", version=f"geo-collect {package_version()}")
@@ -140,7 +140,7 @@ def parser():
     commands.add_parser("agent-guide", help="读取随包分发的 Agent 采集和异常接管说明；不连接手机")
     setup = commands.add_parser("setup", help="为所选本地 Agent 安装或刷新随包分发的采集 Skill；不连接手机")
     setup_target = setup.add_mutually_exclusive_group(required=True)
-    setup_target.add_argument("--agent", choices=["codex", "claude-code", "cursor"])
+    setup_target.add_argument("--agent", choices=list(SUPPORTED_AGENTS))
     setup_target.add_argument("--installed", action="store_true", help="刷新本机所有由 geo-collector 托管的已安装 Skill")
     setup.add_argument("--scope", choices=["user", "project"], default="user", help="默认当前用户；project 仅安装到当前工作目录")
     setup.add_argument("--dry-run", action="store_true", help="只检查目标并返回安装位置，不写文件")
@@ -336,6 +336,14 @@ def verify_run(directory):
             problems.append(f"{prefix} 原始帧或接缝记录不完整")
         if not isinstance(result.get("citations_found"), bool) or (result.get("citations_found") and result.get("citations_expanded") is not True):
             problems.append(f"{prefix} 引用资料未证明展开")
+        citation_details = result.get("citation_details")
+        if task["entry"] == "douyin-direct" and result.get("citations_found"):
+            if not isinstance(citation_details, dict) or citation_details.get("complete") is not True:
+                problems.append(f"{prefix} 抖音小程序参考文献详情未完整采集")
+        if isinstance(citation_details, dict) and citation_details.get("present"):
+            cd_paths = citation_details.get("image_paths", [])
+            if not cd_paths or not set(cd_paths).issubset(result.get("image_paths", [])):
+                problems.append(f"{prefix} 参考文献详情交付图片缺失")
         products = result.get("products", {})
         if not isinstance(products.get("present"), bool) or products.get("complete") is not True:
             problems.append(f"{prefix} 参考药品检查不完整")
@@ -485,8 +493,8 @@ def execute(args):
         if getattr(args, "rule_dir", None) and args.rule_dir.resolve() != Path(state["rule_root"]):
             raise ValueError("恢复必须使用原规则库")
     rule_root = Path(state["rule_root"]) if state else (args.rule_dir or Path(".geo-collector")).resolve()
-    # ponytail: one collector per computer, including different rule roots; add per-device locks and SQLite for parallel phones.
-    with DeviceLease(Path.home() / ".cache" / "geo-collector", "phone-control"):
+    lease_key = args.serial or (state or {}).get("serial") or "phone-control"
+    with DeviceLease(Path.home() / ".cache" / "geo-collector", lease_key):
         device = Device(serial=args.serial or (state or {}).get("serial"), adb=args.adb)
         try:
             if args.command in {"doctor", "inspect"}:

@@ -264,6 +264,12 @@ def run_questions(device, store, run_dir, state, wait=0, teach=()):
                     raise CaptureError("采集返回缺少正文完整性证据，不能标记完成。")
                 if result.get("citations_found") and result.get("citations_expanded") is not True:
                     raise CaptureError("引用资料尚未展开，不能标记完成。")
+                citation_details = result.get("citation_details")
+                if citation_details is not None and citation_details.get("complete") is not True:
+                    raise CaptureError("参考文献详情截图尚未完整采集。")
+                if task["entry"] == "douyin-direct" and result.get("citations_found"):
+                    if not isinstance(citation_details, dict) or citation_details.get("complete") is not True:
+                        raise CaptureError("抖音小程序入口缺少参考文献详情截图验证结果。")
                 frame_count = result.get("frame_count")
                 seams = result.get("seams", [])
                 if type(frame_count) is not int or frame_count < 1 or len(seams) != frame_count - 1 or any(seam.get("verified") is not True for seam in seams):

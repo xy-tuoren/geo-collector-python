@@ -32,7 +32,7 @@ def save_observation(directory, observation):
     (directory / "screen.xml").write_text(observation.xml, encoding="utf-8")
     value = asdict(observation)
     value.pop("png")
-    write_json(directory / "observation.json", value)
+    write_json(directory / "observation.json", value, fsync=False)
 
 
 def load_observation(directory):

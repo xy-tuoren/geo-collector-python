@@ -99,6 +99,7 @@ start -> open -> input -> submitting -> submitted -> capture -> done
 | `capture.generation` | 真实回答已生成结束；页面暂时静止本身不算完成 |
 | `capture.question_top` | 原题首屏，或已核对原题的搜索入口及连续上滚不变的真实回答顶部 |
 | `citation.expand` | 存在引用时，标题和真实资料行均可见 |
+| `citation.details` | 抖音小程序（`douyin-direct`）展开非说明书文献时，逐篇进入详情页验证加载并截取首屏（`回答_参考文献_001.png`…），截完安全返回原回答页 |
 | `capture.body` | 实际回答顶部至末尾连续、无遮挡；相邻原始 PNG 接缝及真实末尾通过验证 |
 | `capture.products` | 存在参考药品时，从首项到真实末项完整采集 App 提供的图文，接缝连续 |
 | `capture.delivery` | 上述证据全部通过，正式 PNG 可解码且属于本题 |

@@ -44,9 +44,10 @@ packages = ["src/geo_collector"]
 
 [tool.hatch.build.targets.wheel.force-include]
 ".agents/skills/geo-collector/SKILL.md" = "geo_collector/agent_guide.md"
+".agents/skills/geo-collector/references/install.md" = "geo_collector/skill_references/install.md"
 
 [tool.hatch.build.targets.sdist]
-include = ["/src", "/README.md", "/INSTALL.md", "/.agents/skills/geo-collector/SKILL.md"]
+include = ["/src", "/README.md", "/INSTALL.md", "/.agents/skills/geo-collector"]
 
 [dependency-groups]
 dev = ["pytest>=8,<10"]

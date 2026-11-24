@@ -81,6 +81,7 @@ jobs:
           geo-collect goals
           geo-collect agent-guide >/dev/null
           geo-collect setup --agent codex --dry-run
+          geo-collect setup --agent antigravity --dry-run
 
       - name: Upload release artifacts
         uses: actions/upload-artifact@v4

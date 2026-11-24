@@ -11,6 +11,7 @@ RELEASE_FILES = (
     ".python-version",
     ".gitignore",
     ".agents/skills/geo-collector/SKILL.md",
+    ".agents/skills/geo-collector/references/install.md",
     "AGENTS.md",
     "FLOW.md",
     "INSTALL.md",

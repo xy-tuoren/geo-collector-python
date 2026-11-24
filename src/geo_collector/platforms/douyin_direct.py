@@ -478,10 +478,10 @@ def _find_empty_tail(engine, task):
         width, height = current.logical_size
         task["direct_open"]["boundary_scrolls"] = count + 1
         engine.save()
-        engine.device.swipe((width / 2, logical[1] + (logical[3] - logical[1]) * .8),
-                            (width / 2, logical[1] + (logical[3] - logical[1]) * .3), .8, expected_package=PACKAGE)
+        engine.device.swipe((width / 2, logical[1] + (logical[3] - logical[1]) * .85),
+                            (width / 2, logical[1] + (logical[3] - logical[1]) * .15), .35, expected_package=PACKAGE)
         engine.log("douyin_direct_boundary_scrolled", ordinal=count + 1)
-        time.sleep(.35)
+        time.sleep(.2)
     return engine.perform(step, "确认最新分隔以下仅有空白或系统欢迎卡、没有用户提问", PACKAGE, check,
                           hints=SESSION_HINTS)
 

@@ -28,7 +28,7 @@ def read_json(file: Path):
     return json.loads(Path(file).read_text(encoding="utf-8"))
 
 
-def write_json(file: Path, value):
+def write_json(file: Path, value, *, fsync: bool = True):
     file = Path(file)
     file.parent.mkdir(parents=True, exist_ok=True)
     temporary = file.with_name(f".{file.name}.{uuid.uuid4().hex}.tmp")
@@ -37,7 +37,8 @@ def write_json(file: Path, value):
             os.chmod(temporary, 0o600)
             json.dump(value, stream, ensure_ascii=False, indent=2)
             stream.flush()
-            os.fsync(stream.fileno())
+            if fsync:
+                os.fsync(stream.fileno())
         os.replace(temporary, file)
     finally:
         temporary.unlink(missing_ok=True)

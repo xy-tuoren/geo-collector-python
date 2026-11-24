@@ -8,7 +8,7 @@ import xml.etree.ElementTree as ET
 from PIL import Image
 
 from .device import map_bounds
-from .images import CaptureError, _image, _png, crop, image_size, match_overlap, stable
+from .images import CaptureError, _image, _match_overlap_images, crop, image_size, stable
 from .recovery import load_observation
 
 
@@ -60,8 +60,9 @@ def horizontal_overlap(previous, current):
         raise CaptureError("横向药品规格视口尺寸改变")
     # Transpose maps the horizontal suffix/prefix to the already verified
     # original-pixel vertical matcher, including its ambiguity rejection.
-    frames = [_png(_image(frame).transpose(Image.Transpose.TRANSPOSE)) for frame in (previous, current)]
-    seam = match_overlap(*frames)
+    first = _image(previous).transpose(Image.Transpose.TRANSPOSE)
+    second = _image(current).transpose(Image.Transpose.TRANSPOSE)
+    seam = _match_overlap_images(first, second)
     if seam["shift"] <= 0:
         raise CaptureError("横向药品规格未证明新增内容")
     return {**seam, "axis": "horizontal"}

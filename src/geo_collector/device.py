@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import io
+from collections import OrderedDict
 from copy import deepcopy
+import hashlib
 import logging
 import math
 import os
@@ -155,6 +157,24 @@ def _locked(trust, policy):
     return trust_locked
 
 
+_STATE_SEP = "__GEO_STATE_SEP__"
+_COMPOUND_STATE_CMD = (
+    f"dumpsys trust; printf '\\n{_STATE_SEP}\\n'; "
+    f"dumpsys window policy; printf '\\n{_STATE_SEP}\\n'; "
+    f"dumpsys window windows; printf '\\n{_STATE_SEP}\\n'; wm size"
+)
+
+
+def _parse_wm_size(output: str) -> tuple[int, int] | None:
+    override = re.search(r"Override size:\s*(\d+)x(\d+)", output)
+    if override:
+        return int(override.group(1)), int(override.group(2))
+    physical = re.search(r"Physical size:\s*(\d+)x(\d+)", output)
+    if physical:
+        return int(physical.group(1)), int(physical.group(2))
+    return None
+
+
 def _resolve_adb(adb):
     configured = adb or os.environ.get("GEO_COLLECT_ADB_PATH") or shutil.which("adb")
     if configured:
@@ -186,10 +206,14 @@ class Device:
         self._device.settings["max_depth"] = 70
         self._device.jsonrpc.setConfigurator({"waitForIdleTimeout": 0, "waitForSelectorTimeout": 0})
         self._ocr = None
-        self._ocr_cache = None
+        self._ocr_cache = OrderedDict()
         self._versions = {}
         self._last_geometry = None
         self._last_window = None
+        self._last_wm_size = None
+        self._adb_device = getattr(self._device, "_adb_device", None) or getattr(self._device, "adb_device", None)
+        self._fast_screencap = self._adb_device is not None
+        self._compound_state = self._adb_device is not None
         self._closed = False
 
     def _adb(self, *args):
@@ -214,7 +238,18 @@ class Device:
 
     def screenshot(self):
         self._open()
-        png = self._adb("-s", self.serial, "exec-out", "screencap", "-p")
+        png = None
+        if self._fast_screencap and self._adb_device is not None:
+            try:
+                raw = self._adb_device.shell("screencap -p", encoding=None)
+                if isinstance(raw, bytes) and raw.startswith(b"\x89PNG\r\n\x1a\n"):
+                    png = raw
+                else:
+                    self._fast_screencap = False
+            except Exception:
+                self._fast_screencap = False
+        if png is None:
+            png = self._adb("-s", self.serial, "exec-out", "screencap", "-p")
         _png_size(png)
         return png
 
@@ -224,10 +259,26 @@ class Device:
         logical_size, rotation = _logical_geometry(info)
         if not info.get("screenOn"):
             raise DeviceError("手机屏幕未点亮；请解锁后继续。")
-        locked = _locked(self._shell("dumpsys", "trust"), self._shell("dumpsys", "window", "policy"))
+        trust = policy = windows = None
+        self._last_wm_size = None
+        if self._compound_state:
+            try:
+                combined = self._shell("sh", "-c", _COMPOUND_STATE_CMD)
+                parts = combined.split(_STATE_SEP)
+                if len(parts) == 4:
+                    trust, policy, windows, wm_out = parts
+                    self._last_wm_size = _parse_wm_size(wm_out)
+                else:
+                    self._compound_state = False
+            except Exception:
+                self._compound_state = False
+        if windows is None:
+            trust = self._shell("dumpsys", "trust")
+            policy = self._shell("dumpsys", "window", "policy")
+            windows = self._shell("dumpsys", "window", "windows")
+        locked = _locked(trust, policy)
         if locked is not False:
             raise DeviceError("手机仍被锁定或无法证明已解锁，已停止UI操作。")
-        windows = self._shell("dumpsys", "window", "windows")
         package, activity = _window_foreground(windows)
         for block in re.split(r"(?=\s*Window #\d+ Window\{)", windows):
             if package + "/" in block and re.search(r"(?:mWindowingMode|windowingMode)=(?:[3456]\b|split|freeform|multi-window)", block):
@@ -270,8 +321,10 @@ class Device:
         self._open()
         if _png_size(observation.png) != observation.physical_size:
             raise DeviceError("OCR截图尺寸与观察记录不一致。")
-        if self._ocr_cache is not None and self._ocr_cache[0] == observation.png:
-            observation.texts = deepcopy(self._ocr_cache[1])
+        cache_key = hashlib.blake2b(observation.png, digest_size=16).digest()
+        if cache_key in self._ocr_cache:
+            self._ocr_cache.move_to_end(cache_key)
+            observation.texts = deepcopy(self._ocr_cache[cache_key])
             return observation.texts
         if self._ocr is None:
             from rapidocr import RapidOCR
@@ -284,7 +337,9 @@ class Device:
         boxes, texts, scores = (getattr(result, key, None) for key in ("boxes", "txts", "scores"))
         observation.texts = []
         if texts is None:
-            self._ocr_cache = (observation.png, [])
+            self._ocr_cache[cache_key] = []
+            while len(self._ocr_cache) > 8:
+                self._ocr_cache.popitem(last=False)
             return observation.texts
         if boxes is None or scores is None or not len(boxes) == len(texts) == len(scores):
             raise DeviceError("OCR文本与定位结果不完整。")
@@ -299,7 +354,9 @@ class Device:
             bounds = (max(0, math.floor(min(xs))), max(0, math.floor(min(ys))), min(width, math.ceil(max(xs))), min(height, math.ceil(max(ys))))
             if bounds[0] < bounds[2] and bounds[1] < bounds[3]:
                 observation.texts.append({"text": str(text), "confidence": confidence, "bounds": bounds})
-        self._ocr_cache = (observation.png, deepcopy(observation.texts))
+        self._ocr_cache[cache_key] = deepcopy(observation.texts)
+        while len(self._ocr_cache) > 8:
+            self._ocr_cache.popitem(last=False)
         return observation.texts
 
     def _guard(self, expected_package):
@@ -308,6 +365,13 @@ class Device:
         logical_size, rotation, package, activity = self._state(expected_package)
         if self._last_window is not None and self._last_window != (package, activity):
             raise DeviceError("同一应用的页面已切换，请重新观察再操作。")
+        if self._last_wm_size is not None:
+            physical_size = self._last_wm_size
+            validate_geometry(logical_size, physical_size, rotation)
+            geometry = (logical_size, physical_size, rotation)
+            if self._last_geometry is not None and self._last_geometry != geometry:
+                raise DeviceError("设备尺寸或旋转已变化，请重新观察再定位，未执行操作。")
+            return logical_size
         physical_size = _png_size(self.screenshot())
         validate_geometry(logical_size, physical_size, rotation)
         geometry = (logical_size, physical_size, rotation)
@@ -317,6 +381,17 @@ class Device:
         if self.foreground() != (package, activity):
             raise DeviceError("操作前前台应用发生变化，未执行操作。")
         return logical_size
+
+    def _current_foreground(self, timeout=2.0):
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                return self.foreground()
+            except ForegroundUnavailable:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise
+                time.sleep(min(.25, remaining))
 
     @staticmethod
     def _action_point(point, size):
@@ -329,7 +404,7 @@ class Device:
     def launch(self, package, restart=False):
         if not re.fullmatch(r"[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)+", package):
             raise DeviceError("应用包名无效。")
-        self._guard(self.foreground()[0])
+        self._guard(self._current_foreground()[0])
         if restart:
             self._device.app_stop(package)
         deadline = time.monotonic() + 20.0
@@ -392,4 +467,4 @@ class Device:
         # must not stop another user's service, app, or screen power state.
         self._closed = True
         self._ocr = None
-        self._ocr_cache = None
+        self._ocr_cache.clear()

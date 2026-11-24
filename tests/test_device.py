@@ -320,3 +320,77 @@ def test_malformed_ocr_cannot_silently_drop_required_boxes(connected):
     device._ocr = lambda *args, **kwargs: SimpleNamespace(txts=["资料"], boxes=None, scores=[0.9])
     with pytest.raises(DeviceError, match="OCR"):
         device.recognize(observation)
+
+
+def test_multi_slot_ocr_cache_reuses_alternating_frames(connected):
+    device, _, _, frames = connected
+    ocr_calls = []
+    device._ocr = lambda data, **kwargs: (
+        ocr_calls.append(len(data)),
+        SimpleNamespace(boxes=[[[10, 10], [80, 10], [80, 40], [10, 40]]], txts=["ok"], scores=[0.99]),
+    )[1]
+    img_a = png((720, 1600))
+    buf = io.BytesIO()
+    Image.new("RGB", (720, 1600), "black").save(buf, "PNG")
+    img_b = buf.getvalue()
+    frames["png"] = img_a
+    obs_a1 = device.observe(ocr=True)
+    frames["png"] = img_b
+    obs_b1 = device.observe(ocr=True)
+    frames["png"] = img_a
+    obs_a2 = device.observe(ocr=True)
+    assert len(ocr_calls) == 2
+    assert obs_a1.texts == obs_a2.texts and obs_b1.texts == obs_a1.texts
+
+
+def test_compound_state_and_fast_guard_skip_redundant_screencap(connected):
+    device, fake, commands, frames = connected
+    shell_calls = []
+
+    class FastAdb:
+        def shell(self, cmd, encoding=None):
+            assert cmd == "screencap -p" and encoding is None
+            return frames["png"]
+
+    def compound_shell(args, timeout=10):
+        shell_calls.append(args)
+        assert args[:2] == ["sh", "-c"]
+        out = module._STATE_SEP.join([
+            fake.trust,
+            fake.policy,
+            f"mCurrentFocus=Window{{abc u0 {fake.package}/.MainActivity}}",
+            "Physical size: 720x1600",
+        ])
+        return SimpleNamespace(output=out, exit_code=0)
+
+    fake.shell = compound_shell
+    device._adb_device = FastAdb()
+    device._fast_screencap = True
+    device._compound_state = True
+    commands.clear()
+
+    device.observe()
+    before_shells = len(shell_calls)
+    device.tap((360, 400), PACKAGE)
+    # _guard used 1 compound shell and 0 subprocess adb screencaps!
+    assert len(shell_calls) == before_shells + 1
+    assert commands == []
+    assert fake.calls[-1] == ("click", 360, 400)
+
+
+def test_launch_retries_transient_foreground_unavailable_before_guard(connected, monkeypatch):
+    device, fake, _, _ = connected
+    clock, attempts = [0.0], [0]
+    monkeypatch.setattr(module.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(module.time, "sleep", lambda d: clock.__setitem__(0, clock[0] + d))
+    real_fg = device.foreground
+
+    def flaky_fg():
+        attempts[0] += 1
+        if attempts[0] == 1:
+            raise module.ForegroundUnavailable("transient")
+        return real_fg()
+
+    monkeypatch.setattr(device, "foreground", flaky_fg)
+    device.launch(PACKAGE)
+    assert attempts[0] >= 2 and fake.calls[-1][0] == "start"
