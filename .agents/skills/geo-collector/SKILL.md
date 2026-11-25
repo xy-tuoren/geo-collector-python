@@ -11,11 +11,26 @@ description: 安装、升级并使用 geo-collect CLI 从安卓手机采集小�
 - **版本升级**：用户要求更新或遇到旧版缺少命令时，执行 `geo-collect upgrade --mirror tuna`（国际网络用 `geo-collect upgrade`），一键升级 CLI 并自动刷新本机所有受管 Skill（不影响 `.geo-collector/` 规则和 `captures/` 数据）。
 - **安装或环境报错**：仅当 `uv`、`adb`、Windows VC++、Linux `libgl1`/USB 权限或手机授权报错时，按需读取同目录下的 [references/install.md](references/install.md)；平时采集无需读取。
 
-进入用户选定的可写本地工作目录后，先读 `geo-collect entries` 与 `geo-collect goals`，按用户指定的题库、入口和设备执行；不主动扩大问题范围。首次在这个工作目录采集时先运行 `geo-collect doctor` 检查手机、截图和 OCR；用户尚未授权调试、连接或解锁时，在当前对话说明需要完成的操作并等待回复。把题库、断点和修复计划放在 `captures/`，规则放在 `.geo-collector/`，若工作目录在 Git 仓库内则先将这两个目录加入忽略规则。Skill 仅包含工作说明，真实修复规则由每位用户本地验证和保存。
+进入用户选定的可写本地工作目录后，按以下**标准最短路径**执行（不要反复翻查 `--help`、不要读源码确认格式：题库固定为 UTF-8 纯文本每行一题并按原始行号编号，默认输出目录为 `captures/`，规则目录为 `.geo-collector/`；若工作目录在 Git 仓库内，先将这两个目录加入 `.gitignore`）：
 
 四个入口 ID 为 `xiaohe`（小荷 App 直接提问）、`douyin`（抖音搜索原题）、`toutiao`（头条搜索原题）、`douyin-direct`（抖音搜索“小荷ai医生 小程序”后进入新会话提问，展开非说明书文献时还会自动逐篇进详情页截首屏）。两个抖音入口共享 App，但任务、规则与交付目录独立，不可互相替代。
 
-- **启动前范围确认**：若用户在对话中**未明确指定采集入口**，不要默默按 CLI 默认值（`xiaohe douyin`）直接开跑；须先在当前对话主动向用户确认要采哪几个入口（列出上述四个选项，可多选，有提问/多选工具时优先使用），等用户选定后再显式传 `--entry ...` 启动。若未提供题目/题库路径或连接了多台手机未指定设备，同样先询问确认。用户已明确给出入口、题目与设备时直接执行，不重复追问。
+1. **启动前范围确认**：若用户在对话中**未明确指定采集入口**，不要默默按 CLI 默认值（`xiaohe douyin`）直接开跑；须先在当前对话主动向用户确认要采哪几个入口（列出上述四个选项，可多选，有提问/多选工具时优先使用），等用户选定后再显式传 `--entry ...` 启动。若未提供题目/题库路径或连接了多台手机未指定设备，同样先询问确认。用户已明确给出入口、题目与设备时直接执行，不重复追问。
+2. **确认设备就绪**：执行 `geo-collect devices` 选定目标设备；首次在当前工作目录采集时再运行一次 `geo-collect doctor` 检查截图和 OCR（无需每次都用 `adb` 逐个排查 App 与格式）。设备未授权调试、未连接或锁屏时，在当前对话说明需要完成的操作并等待回复。
+3. **一步直接启动整批（默认加 `--screen`，严禁加 `--learn`）**：
+   ```bash
+   # 单台设备（桌面环境默认加 --screen 自动弹出只读实时监测窗口）
+   geo-collect run --entry xiaohe douyin toutiao douyin-direct \
+     --questions-file captures/questions.txt --serial <设备序列号> --screen
+
+   # 多台空闲设备并行分摊并自动平铺投屏
+   geo-collect run --all-devices --screen --entry xiaohe douyin toutiao douyin-direct \
+     --questions-file captures/questions.txt
+   ```
+   - **严禁在日常或新设备首次采集时加 `--learn`**：四个入口均已内置完整自动定位规则，直接普通 `run` 即可全自动跑通。`--learn` 会强制跳过内置规则并在每个入口的开局与回答页故意中断（退出码 20），**仅当用户明确要求强制从零示教新界面时才使用**。只有真正遇到 App 改版导致 CLI 自动退出码 20 时，才按需接管修复。
+   - **桌面环境默认开启 `--screen`**：在 macOS / Windows / Linux 图形桌面执行 `run` 或 `resume` 时，默认加上 `--screen` 打开只读实时同步监测窗口（首次会自动下载并校验 `scrcpy`，不影响 `uiautomator2`），除非用户明确要求关闭投屏或当前为无图形界面的 SSH/headless 环境。
+
+Skill 仅包含工作说明，真实修复规则由每位用户本地验证和保存。仅在需要排查协议细节时再按需调用 `geo-collect entries` 或 `geo-collect goals`。
 
 ## 当前对话负责统筹
 
@@ -25,31 +40,31 @@ description: 安装、升级并使用 geo-collect CLI 从安卓手机采集小�
 
 等待本地批次的实际结果，成功后验收，失败后接管；不能只启动后台进程就结束对话并声称仍在看守。控件改名、位置变化或新导航应先依据现场尝试适配，不因第一次定位失败就询问用户。
 
-- **进度逐步同步**：长批次（多题或多入口）运行期间，应向用户逐步同步简明进度，不要全程静默直到几十题跑完才发声。同步时机包括：批次启动后、每完成一个入口或每隔约 3～5 分钟/阶段节点、遇到断点接管前后以及最终验收时。汇报进度只通过**离线读取 `调试产物/run.json`** 汇总各入口 `已采 / 无入口 / 待采` 与当前题号/阶段即可，**不得**逐屏截读图片、高频轮询或把逐帧调试日志塞进模型上下文。桌面环境下如需让用户直观看到真机实时画面，可给 `run/resume` 加 `--screen`（或独立运行 `geo-collect screen`，多机可用 `geo-collect devices`、`screen --all`、`run --all-devices --screen`）。
+- **进度逐步同步**：长批次（多题或多入口）运行期间，应向用户逐步同步简明进度，不要全程静默直到几十题跑完才发声。同步时机包括：批次启动后、每完成一个入口或每隔约 3～5 分钟/阶段节点、遇到断点接管前后以及最终验收时。汇报进度只通过**离线读取 `调试产物/run.json`** 汇总各入口 `已采 / 无入口 / 待采` 与当前题号/阶段即可，**不得**逐屏截读图片、高频轮询或把逐帧调试日志塞进模型上下文。桌面环境下 `run`/`resume` 默认已带 `--screen` 打开实时监测窗（多机平铺可用 `--all-devices --screen` 或独立运行 `geo-collect screen --all`）。
 
 ## 让采集器连续运行
 
-- 用 `run --entry … --questions-file …` 一次启动整个批次。需要选题时用 `--question-index` 指定原文件行号；多台手机并行分题用 `--all-devices` 或 `--serials`。
+- 用 `run --entry … --questions-file … --screen` 一次启动整个批次。需要选题时用 `--question-index` 指定原文件行号；多台手机并行分题用 `--all-devices` 或 `--serials`。
 - 正常运行保持单一批次连续执行，不要逐屏读图或把逐帧事件流灌入上下文；需要向用户同步阶段进度时仅轻量离线读取 `调试产物/run.json`。成功、验收结果、运行时失败和接管 JSON 均位于 stdout；运行时失败退出码为 1，argparse 参数解析错误写入 stderr 并退出 2，调用方先看退出码。需要诊断时再按对应阶段读本地日志。
 - 已有回答用 `--capture-current-answer`，必须明确一个入口和准确的一道题；此模式不输入、不发送、不新建会话。`douyin-direct` 必须保留本批次原始发送证据，已有任务用 `resume` 原批次。
-- 批次暂停后始终 `resume <原批次目录>`；不要新开批次绕过发送状态或失败断点。
-- 首次教学用 `--learn`。验收通过后用不带 `--learn` 的运行验证规则复用。
+- 批次暂停后始终 `resume <原批次目录> --screen`（桌面环境保持投屏）；不要新开批次绕过发送状态或失败断点。
+- **不要**在正常采集（含新环境首次运行）加 `--learn`；仅在用户明确要求从零强制示教新界面时使用 `--learn`，验收后再用不带 `--learn` 的普通运行验证规则复用。
 
 ## 按需处理未知页面
 
-退出码 20 时，先读 `handoff <批次目录>` 的精简现场，优先查看 `triage`（前置故障分诊）与 `prior_lessons`（历史已验证经验），按分诊分支处理：
+仅当 CLI 实际返回退出码 20 时才介入。先读 `handoff <批次目录>` 的精简现场，优先查看 `triage`（前置故障分诊）与 `prior_lessons`（历史已验证经验），按分诊分支处理：
 
 | `triage.failure_class` | 默认动作 |
 | :--- | :--- |
 | `user_action_required` | 登录、验证码、风控或锁屏：**立即停止并在当前对话向用户说明**，不盲目点击 |
 | `transient_env` | 网络异常或加载未就绪：优先等待后 `resume`，或按 `triage.auto_retry_candidate` 执行一次性 `teach <批次> tap ... --transient`（不写入永久路径） |
-| `ui_drift` | 先遵循 `prior_lessons`；再按需 `teach <批次> status` / 看原图，用 `repair --preview` 或单步 `teach` 适配 |
+| `ui_drift` | 先遵循 `prior_lessons`；需要点击/滑动探索直接用单步 `teach` 实机推进，需要绑定页面角色再看原图并用 `repair --preview --role` 核对后提交 |
 | `detector_gap` | 采集接缝、药图就绪或布局容器复查：按 `allowed_resolutions` 核对 `repair --preview`、绑定角色/布局或 `recover`，不得降级验收 |
 
 常用自愈与沉淀命令：
 
-- **离线预演与提交**：先跑 `repair <request> --sha256 <sha256> --preview`，再用 `--preview --candidate <id> --role <role>`、`--preview --plan <file>` 或 `--preview --point <X> <Y>`（不会落盘写模板）在同一现场核对 `roles`、`scene_check` 和 `missing_evidence`，合适时去掉 `--preview` 提交再 `resume`。`requires_resume` 表示后续导航或多帧证据须实机复核；药图复查可查看 `unready_regions` 的物理像素范围。
-- **单步实机教学**：依据 `objective`、`missing_evidence`、`allowed_resolutions` 和 `checkpoint` 每次只执行一个已观察动作，用 `teach <批次> tap|swipe|back|perception`。无文案纯图标可用 `teach <批次> tap --point X Y` 提取唯一视觉模板；一次性网络“重试”加 `--transient` 避免写入永久路径。不要猜整条点击路线，也不要用固定像素坐标或动态问题正文作为长期规则。
+- **点击/滑动导航探索（优先用 `teach` 一步推进）**：需要点击按钮、图标或滑动页面时，依据 `objective`、`missing_evidence`、`allowed_resolutions` 和 `checkpoint` 直接执行单步 `teach <批次> tap --node ...`、`teach <批次> tap --point X Y`（无文案纯图标自动提取唯一视觉模板）或 `teach <批次> swipe|back`，不要先绕道在 `repair --point` 上反复试错；一次性网络“重试”加 `--transient` 避免写入永久路径。不要猜整条点击路线，也不要用固定像素坐标或动态问题正文作为长期规则。
+- **页面角色绑定与离线预演**：需要绑定页面角色（如 `question`、`input`、`session_welcome`、`citations_header`）或复查 `capture.review` 现场时，先跑 `repair <request> --sha256 <sha256> --preview --candidate <id> --role <role>`（或 `--preview --plan <file>`，不落盘不操作手机）核对 `roles`、`scene_check` 和 `missing_evidence`，合适后去掉 `--preview` 提交再 `resume`。`requires_resume` 表示后续导航或多帧证据须实机复核；药图复查可查看 `unready_regions` 的物理像素范围。
 - **注册可复用弹窗/弹层**：遇到广告、升级提示等重复遮挡弹窗时，用 `teach <批次> interrupt --name <小写名称> --detect-ocr '<正则>' --node text=稍后再说`（或 `--back`）验证关闭并立即入库，后续 CLI 每步前自动清理，不再暂停。
 - **沉淀与维护排障经验**：当用户在对话中点拨了可复用排障套路（如某错误码对应 `--transient` 重试、某弹窗注册 `interrupt`、某页面绑定角色等），离线执行 `teach <批次> lesson --strategy <策略> --match '<关键词>' --note '<一句话经验>'`（默认整题验收后自动晋升至 `.geo-collector/lessons.json`；登录/风控等人工阻塞经验加 `--immediate`）。也可用 `geo-collect lessons list|add|disable|enable|feedback` 查看、增补或停用过时经验；后续新会话与 `--agent codex` 会通过 `handoff.prior_lessons` 自动召回。
 

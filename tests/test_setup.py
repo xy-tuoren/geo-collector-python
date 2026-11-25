@@ -50,6 +50,7 @@ def test_dry_run_returns_destination_without_writes(workspace):
     assert not list(home.iterdir()) and not list(project.iterdir())
     guide = setup.agent_guide()
     assert "启动前范围确认" in guide and "xiaohe-geo-collector" in guide
+    assert "严禁" in guide and "--learn" in guide and "--screen" in guide
 
 
 def test_repeat_install_is_idempotent_and_upgrade_preserves_extra_files(workspace, monkeypatch):

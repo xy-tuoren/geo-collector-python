@@ -40,7 +40,7 @@ def parser():
             command.add_argument("--repair", choices=["pause", "wait"], default="pause", help="未知页面默认退出并保存断点；wait供正在运行的Agent接管")
             command.add_argument("--wait-timeout", type=int, default=180)
             command.add_argument("--teach", action="append", default=[], help="强制由Agent示教指定步骤，如citation.expand")
-            command.add_argument("--screen", action="store_true", help="采集期间自动打开实时同步屏幕（默认只读防误触，缺 scrcpy 时自动安装）")
+            command.add_argument("--screen", action="store_true", help="采集期间自动打开只读实时同步屏幕（桌面环境推荐默认开启，缺 scrcpy 时自动安装）")
             command.add_argument("--screen-control", action="store_true", help="采集期间打开实时同步屏幕并允许电脑键鼠操控手机")
             command.add_argument("--scrcpy", help="配合 --screen 使用，指定自定义 scrcpy 路径")
             command.add_argument("--screen-window", type=int, nargs=3, metavar=("X", "Y", "WIDTH"),
@@ -55,7 +55,7 @@ def parser():
                 command.add_argument("--question-index", default="", help="从1开始，逗号分隔，如1,5,12")
                 command.add_argument("--entry", nargs="+", choices=list(PLATFORMS), default=["xiaohe", "douyin"])
                 command.add_argument("--capture-current-answer", action="store_true", help="只采当前回答，不输入/发送/新会话；需指定一题和一个入口")
-                command.add_argument("--learn", action="store_true", help="由当前Agent首次探索入口并识别页面角色；整题验收后保存复用")
+                command.add_argument("--learn", action="store_true", help="仅用于强制跳过内置定位、从零示教全新界面；日常及新机首次采集切勿添加")
                 command.add_argument("--output", type=Path, default=Path("captures"))
             else:
                 command.add_argument("run_directory", type=Path)

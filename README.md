@@ -45,8 +45,8 @@ geo-collect verify /绝对路径/fleet_日期时间                        # 联
 头条通过 `--entry toutiao` 显式选择；不传 `--entry` 时仍只运行小荷 App 和抖音。头条支持“智能总结 → 查看更多／查看全文”和“小荷AI医生＋小程序标记”两种首屏入口，兼容旧搜索框及新版“搜索框，原题”语义节点：
 
 ```bash
-uv run geo-collect run --entry toutiao --question '需要采集的问题'
-# 首次由 Agent 教学
+uv run geo-collect run --entry toutiao --question '需要采集的问题' --screen
+# 仅在强制跳过内置定位、从零示教全新界面时使用（日常及首次采集无需添加）
 uv run geo-collect run --entry toutiao --question '需要采集的问题' --learn
 # 采集准确对应本题的已有回答或搜索结果，不重新输入、搜索
 uv run geo-collect run --entry toutiao --question '已有的完整问题' --capture-current-answer
