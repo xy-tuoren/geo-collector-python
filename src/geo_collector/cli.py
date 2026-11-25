@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import nullcontext
 import hashlib
 import json
+import re
 import sys
 import statistics
 import time
@@ -38,7 +40,16 @@ def parser():
             command.add_argument("--repair", choices=["pause", "wait"], default="pause", help="未知页面默认退出并保存断点；wait供正在运行的Agent接管")
             command.add_argument("--wait-timeout", type=int, default=180)
             command.add_argument("--teach", action="append", default=[], help="强制由Agent示教指定步骤，如citation.expand")
+            command.add_argument("--screen", action="store_true", help="采集期间自动打开实时同步屏幕（默认只读防误触，缺 scrcpy 时自动安装）")
+            command.add_argument("--screen-control", action="store_true", help="采集期间打开实时同步屏幕并允许电脑键鼠操控手机")
+            command.add_argument("--scrcpy", help="配合 --screen 使用，指定自定义 scrcpy 路径")
+            command.add_argument("--screen-window", type=int, nargs=3, metavar=("X", "Y", "WIDTH"),
+                                 help="指定 --screen 窗口左上角坐标与宽度（多机平铺自动传入）")
             if name == "run":
+                command.add_argument("--serials", help="多机并行采集：逗号分隔手机序列号，自动分摊题目")
+                command.add_argument("--all-devices", action="store_true", help="多机并行采集：自动使用所有已授权手机分摊题目")
+                command.add_argument("--window-width", type=int, default=360, help="多机 --screen 平铺单窗宽度（默认 360）")
+                command.add_argument("--columns", type=int, help="多机 --screen 平铺每行窗口数（默认最多 4 列）")
                 command.add_argument("--questions-file", type=Path)
                 command.add_argument("--question", help="单题，与questions-file二选一")
                 command.add_argument("--question-index", default="", help="从1开始，逗号分隔，如1,5,12")
@@ -48,6 +59,9 @@ def parser():
                 command.add_argument("--output", type=Path, default=Path("captures"))
             else:
                 command.add_argument("run_directory", type=Path)
+                if name == "resume":
+                    command.add_argument("--window-width", type=int, default=360, help="多机 --screen 平铺单窗宽度（默认 360）")
+                    command.add_argument("--columns", type=int, help="多机 --screen 平铺每行窗口数（默认最多 4 列）")
                 if name == "recover":
                     command.add_argument("--action", choices=["retry-current", "reenter-answer", "restart-app", "recapture-body"], required=True)
                     command.add_argument("--reason", required=True)
@@ -153,6 +167,29 @@ def parser():
     handoff = commands.add_parser("handoff", help="离线读取当前断点的精简现场，不连接手机")
     handoff.add_argument("run_directory", type=Path)
     handoff.add_argument("--limit", type=int, default=24, help="最多返回的节点候选数")
+    devices = commands.add_parser("devices", help="列出当前连接的所有 ADB 手机及授权状态；不占用设备锁")
+    devices.add_argument("--adb", help="指定 adb 路径")
+    screen = commands.add_parser("screen", help="打开当前已连接手机的实时同步屏幕（支持多机自动平铺；缺少 scrcpy 时自动下载官方预编译包）")
+    screen.add_argument("--serial", help="指定单台手机序列号；默认自动选择唯一已授权设备")
+    screen.add_argument("--serials", help="同时打开多台手机并自动平铺：逗号分隔序列号")
+    screen.add_argument("--all", dest="all_devices", action="store_true", help="一键打开所有已授权手机的实时同步屏幕并自动平铺")
+    screen.add_argument("--adb", help="指定 adb 路径")
+    screen.add_argument("--scrcpy", help="指定本地 scrcpy 路径")
+    screen.add_argument("--control", action="store_true", help="允许电脑键鼠操控手机（默认只读，避免采集时误触）")
+    screen.add_argument("--audio", action="store_true", help="开启手机音频同步（默认关闭）")
+    screen.add_argument("--max-size", type=int, default=1080, help="画面长边最大像素，0 表示原始分辨率（默认 1080）")
+    screen.add_argument("--max-fps", type=int, default=30, help="最大帧率，0 表示不限（默认 30）")
+    screen.add_argument("--window-width", type=int, default=360, help="多机平铺时单个窗口宽度（默认 360）")
+    screen.add_argument("--columns", type=int, help="多机平铺时每行最多窗口数（默认最多 4 列）")
+    screen.add_argument("--always-on-top", action="store_true", help="投屏窗口置顶")
+    screen.add_argument("--title", help="自定义窗口标题")
+    screen.add_argument("--background", action="store_true", help="后台拉起投屏窗口后立即返回 JSON")
+    screen.add_argument("--no-auto-install", action="store_true", help="未找到 scrcpy 时不自动下载安装")
+    screen.add_argument("--install-only", action="store_true", help="仅检查或自动安装 scrcpy，不连接手机或打开窗口")
+    screen.add_argument("--force-install", action="store_true", help="强制重新下载官方 scrcpy 到托管缓存目录")
+    screen.add_argument("--download-url", help="自定义 scrcpy 压缩包下载地址（仍校验官方 SHA256）")
+    screen.add_argument("--mirror-prefix", help="GitHub 下载加速前缀，如 https://ghfast.top/")
+    screen.add_argument("--dry-run", action="store_true", help="只检查设备与 scrcpy 命令，不下载也不启动窗口")
     return root
 
 
@@ -172,8 +209,25 @@ def new_run(args):
     items = questions(args)
     if args.capture_current_answer and (len(items) != 1 or len(args.entry) != 1):
         raise ValueError("当前回答模式必须明确指定一个入口和一道已有问题")
-    directory = args.output.resolve() / time.strftime("batch_%Y%m%d-%H%M%S")
-    directory.mkdir(parents=True, exist_ok=False)
+    output_root = args.output.resolve()
+    output_root.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("batch_%Y%m%d-%H%M%S")
+    serial_slug = re.sub(r"[^A-Za-z0-9._-]+", "_", args.serial).strip("_")[:24] if args.serial else ""
+    candidates = [stamp]
+    if serial_slug:
+        candidates.append(f"{stamp}_{serial_slug}")
+    candidates.extend(f"{stamp}_{idx}" for idx in range(2, 100))
+    directory = None
+    for name in candidates:
+        candidate = output_root / name
+        try:
+            candidate.mkdir(parents=True, exist_ok=False)
+            directory = candidate
+            break
+        except FileExistsError:
+            continue
+    if directory is None:
+        raise RuntimeError(f"无法在 {output_root} 创建唯一批次目录")
     rule_root = (args.rule_dir or Path(".geo-collector")).resolve()
     teach = list(args.teach)
     if args.learn:
@@ -469,8 +523,46 @@ def execute(args):
     if args.command == "cases":
         from .teach import list_cases
         return list_cases(args.run_directory)
+    if args.command == "devices":
+        from .screen import list_adb_devices
+        adb_path, entries = list_adb_devices(adb=args.adb)
+        return {"adb": adb_path, "devices": entries, "ready_count": sum(1 for item in entries if item["ready"])}
     if args.command == "verify":
+        from .fleet import is_fleet_directory, verify_fleet
+        if is_fleet_directory(args.run_directory):
+            return verify_fleet(args.run_directory)
         return verify_run(args.run_directory)
+    if args.command == "screen":
+        from .screen import run_screen_command
+        return run_screen_command(
+            serial=args.serial,
+            serials=args.serials,
+            all_devices=args.all_devices,
+            adb=args.adb,
+            scrcpy_path=args.scrcpy,
+            control=args.control,
+            audio=args.audio,
+            max_size=args.max_size,
+            max_fps=args.max_fps,
+            window_width=args.window_width,
+            columns=args.columns,
+            always_on_top=args.always_on_top,
+            title=args.title,
+            background=args.background,
+            auto_install=not args.no_auto_install,
+            install_only=args.install_only,
+            force_install=args.force_install,
+            download_url=args.download_url,
+            mirror_prefix=args.mirror_prefix,
+            dry_run=args.dry_run,
+        )
+    if args.command == "run" and (getattr(args, "all_devices", False) or getattr(args, "serials", None)):
+        from .fleet import run_fleet
+        return run_fleet(args)
+    if args.command == "resume":
+        from .fleet import is_fleet_directory, resume_fleet
+        if is_fleet_directory(args.run_directory):
+            return resume_fleet(args, args.run_directory)
     agent_limits = None
     if getattr(args, "agent", "none") == "codex":
         if sys.platform == "win32":
@@ -515,22 +607,39 @@ def execute(args):
             state["serial"] = device.serial
             write_json(directory / "调试产物" / "run.json", state)
             print(json.dumps({"event": "run_opened", "run_directory": str(directory)}, ensure_ascii=False), file=sys.stderr, flush=True)
-            if args.command == "recover":
-                from .workflow import recover_current
-                recover_current(device, RuleStore(rule_root), directory, state, args.action, args.reason)
-            store = RuleStore(rule_root)
+            mirror_enabled = bool(getattr(args, "screen", False) or getattr(args, "screen_control", False))
+            if mirror_enabled:
+                from .screen import screen_mirror
+                win = getattr(args, "screen_window", None)
+                mirror_ctx = screen_mirror(
+                    serial=device.serial,
+                    adb_path=device.adb,
+                    scrcpy_path=getattr(args, "scrcpy", None),
+                    control=bool(getattr(args, "screen_control", False)),
+                    window_x=win[0] if win else None,
+                    window_y=win[1] if win else None,
+                    window_width=win[2] if win else None,
+                    log_file=directory / "调试产物" / "screen.log",
+                )
+            else:
+                mirror_ctx = nullcontext()
+            with mirror_ctx:
+                if args.command == "recover":
+                    from .workflow import recover_current
+                    recover_current(device, RuleStore(rule_root), directory, state, args.action, args.reason)
+                store = RuleStore(rule_root)
 
-            def collect():
-                run_questions(device, store, directory, state,
-                              wait=args.wait_timeout if args.repair == "wait" else 0,
-                              teach=sorted(set(args.teach) | set(state.get("teach", []))))
-                return verify_run(directory)
+                def collect():
+                    run_questions(device, store, directory, state,
+                                  wait=args.wait_timeout if args.repair == "wait" else 0,
+                                  teach=sorted(set(args.teach) | set(state.get("teach", []))))
+                    return verify_run(directory)
 
-            if agent_limits is not None:
-                from .agent_runtime import supervise_collection
-                return supervise_collection(device, store, directory, state, resume=collect, limits=agent_limits,
-                                            retry_failed=args.retry_agent_error)
-            return collect()
+                if agent_limits is not None:
+                    from .agent_runtime import supervise_collection
+                    return supervise_collection(device, store, directory, state, resume=collect, limits=agent_limits,
+                                                retry_failed=args.retry_agent_error)
+                return collect()
         finally:
             device.close()
 

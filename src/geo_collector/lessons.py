@@ -11,7 +11,7 @@ import hashlib
 import time
 from pathlib import Path
 
-from .storage import read_json, write_json
+from .storage import file_lock, read_json, write_json
 
 
 STRATEGIES = {
@@ -126,66 +126,70 @@ class LessonStore:
         payload = {**spec, **({"source": source} if source is not None else {})}
         normalized = validate_lesson(payload)
         ident = lesson_id(normalized)
-        data = self.all()
-        now = time.time()
-        for existing in data["lessons"]:
-            if existing.get("id") == ident:
-                existing.update(normalized, active=True, failures=0, verified_at=now)
-                existing.pop("invalidated_at", None)
-                existing.pop("reason", None)
-                write_json(self.file, data)
-                return existing
-        record = {
-            "id": ident,
-            "active": True,
-            **normalized,
-            "verified_at": now,
-            "successes": 0,
-            "failures": 0,
-            "last_used_at": None,
-        }
-        data["lessons"].append(record)
-        write_json(self.file, data)
-        return record
+        with file_lock(self.root / ".lessons.lock"):
+            data = self.all()
+            now = time.time()
+            for existing in data["lessons"]:
+                if existing.get("id") == ident:
+                    existing.update(normalized, active=True, failures=0, verified_at=now)
+                    existing.pop("invalidated_at", None)
+                    existing.pop("reason", None)
+                    write_json(self.file, data)
+                    return existing
+            record = {
+                "id": ident,
+                "active": True,
+                **normalized,
+                "verified_at": now,
+                "successes": 0,
+                "failures": 0,
+                "last_used_at": None,
+            }
+            data["lessons"].append(record)
+            write_json(self.file, data)
+            return record
 
     def disable(self, ident: str, *, reason: str = "手动停用") -> dict:
-        data = self.all()
-        for item in data["lessons"]:
-            if item.get("id") == ident:
-                item.update(active=False, invalidated_at=time.time(), reason=_clean_short(reason, limit=120) or "手动停用")
-                write_json(self.file, data)
-                return item
-        raise ValueError(f"未找到经验记录：{ident}")
+        with file_lock(self.root / ".lessons.lock"):
+            data = self.all()
+            for item in data["lessons"]:
+                if item.get("id") == ident:
+                    item.update(active=False, invalidated_at=time.time(), reason=_clean_short(reason, limit=120) or "手动停用")
+                    write_json(self.file, data)
+                    return item
+            raise ValueError(f"未找到经验记录：{ident}")
 
     def enable(self, ident: str) -> dict:
-        data = self.all()
-        for item in data["lessons"]:
-            if item.get("id") == ident:
-                item.update(active=True, failures=0)
-                item.pop("invalidated_at", None)
-                item.pop("reason", None)
-                write_json(self.file, data)
-                return item
-        raise ValueError(f"未找到经验记录：{ident}")
+        with file_lock(self.root / ".lessons.lock"):
+            data = self.all()
+            for item in data["lessons"]:
+                if item.get("id") == ident:
+                    item.update(active=True, failures=0)
+                    item.pop("invalidated_at", None)
+                    item.pop("reason", None)
+                    write_json(self.file, data)
+                    return item
+            raise ValueError(f"未找到经验记录：{ident}")
 
     def record_outcome(self, ident: str, *, success: bool, reason: str | None = None) -> dict | None:
-        data = self.all()
-        for item in data["lessons"]:
-            if item.get("id") != ident:
-                continue
-            now = time.time()
-            if success:
-                item.update(active=True, failures=0, successes=item.get("successes", 0) + 1, last_used_at=now)
-                item.pop("invalidated_at", None)
-                item.pop("reason", None)
-            else:
-                failures = item.get("failures", 0) + 1
-                item.update(failures=failures, last_failure_at=now, last_error=_clean_short(reason, limit=160) or None)
-                if failures >= FAILURE_LIMIT:
-                    item.update(active=False, invalidated_at=now, reason=item["last_error"] or "连续失效")
-            write_json(self.file, data)
-            return item
-        return None
+        with file_lock(self.root / ".lessons.lock"):
+            data = self.all()
+            for item in data["lessons"]:
+                if item.get("id") != ident:
+                    continue
+                now = time.time()
+                if success:
+                    item.update(active=True, failures=0, successes=item.get("successes", 0) + 1, last_used_at=now)
+                    item.pop("invalidated_at", None)
+                    item.pop("reason", None)
+                else:
+                    failures = item.get("failures", 0) + 1
+                    item.update(failures=failures, last_failure_at=now, last_error=_clean_short(reason, limit=160) or None)
+                    if failures >= FAILURE_LIMIT:
+                        item.update(active=False, invalidated_at=now, reason=item["last_error"] or "连续失效")
+                write_json(self.file, data)
+                return item
+            return None
 
     def recall(self, *, entry: str = "", package: str = "", step: str = "", activity: str = "",
                texts: tuple[str, ...] | list[str] = (), reason: str = "", limit: int = 3) -> list[dict]:

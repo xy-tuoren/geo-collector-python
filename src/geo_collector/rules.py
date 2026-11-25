@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from .storage import read_json, write_json
+from .storage import file_lock, read_json, write_json
 
 
 class LocateError(RuntimeError):
@@ -457,18 +457,20 @@ class RuleStore:
         return found
 
     def promote(self, package, step, recipe, observation, source):
-        value = self.all()
-        key = f"{package}:{step}"
-        previous = value["rules"].get(key)
-        revision = (previous or {}).get("revision", 0) + 1
-        if previous:
-            write_json(self.root / "history" / f"{hashlib.sha256(key.encode()).hexdigest()[:16]}-{previous['revision']}.json", previous)
-        variants = [*previous.get("variants", []), {k: v for k, v in previous.items() if k != "variants"}] if previous else []
-        value["rules"][key] = {"revision": revision, "active": True, "recipe": validate_recipe(recipe), "source": source,
-                                "verified_at": time.time(), "app_version": observation.version, "activity": observation.activity,
-                                "screen_size": list(observation.logical_size), "verified_versions": [observation.version],
-                                "successes": 0, "failures": 0, "variants": variants}
-        write_json(self.file, value)
+        validated = validate_recipe(recipe)
+        with file_lock(self.root / ".rules.lock"):
+            value = self.all()
+            key = f"{package}:{step}"
+            previous = value["rules"].get(key)
+            revision = (previous or {}).get("revision", 0) + 1
+            if previous:
+                write_json(self.root / "history" / f"{hashlib.sha256(key.encode()).hexdigest()[:16]}-{previous['revision']}.json", previous)
+            variants = [*previous.get("variants", []), {k: v for k, v in previous.items() if k != "variants"}] if previous else []
+            value["rules"][key] = {"revision": revision, "active": True, "recipe": validated, "source": source,
+                                    "verified_at": time.time(), "app_version": observation.version, "activity": observation.activity,
+                                    "screen_size": list(observation.logical_size), "verified_versions": [observation.version],
+                                    "successes": 0, "failures": 0, "variants": variants}
+            write_json(self.file, value)
 
     def _rules(self, value, package, step, revision=None):
         entry = value["rules"].get(f"{package}:{step}")
@@ -477,30 +479,32 @@ class RuleStore:
         return [rule for rule in [entry, *entry.get("variants", [])] if revision is None or rule["revision"] == revision]
 
     def record_success(self, package, step, revision, observation):
-        value = self.all()
-        changed = False
-        for rule in self._rules(value, package, step, revision):
-            versions = [v for v in rule.get("verified_versions", [rule.get("app_version")]) if v and v != observation.version]
-            rule.update(active=True, failures=0, successes=rule.get("successes", 0) + 1, last_success_at=time.time(),
-                        verified_versions=[*versions[-(VERSION_HISTORY - 1):], observation.version])
-            rule.pop("invalidated_version", None)
-            changed = True
-        if changed:
-            write_json(self.file, value)
+        with file_lock(self.root / ".rules.lock"):
+            value = self.all()
+            changed = False
+            for rule in self._rules(value, package, step, revision):
+                versions = [v for v in rule.get("verified_versions", [rule.get("app_version")]) if v and v != observation.version]
+                rule.update(active=True, failures=0, successes=rule.get("successes", 0) + 1, last_success_at=time.time(),
+                            verified_versions=[*versions[-(VERSION_HISTORY - 1):], observation.version])
+                rule.pop("invalidated_version", None)
+                changed = True
+            if changed:
+                write_json(self.file, value)
 
     def invalidate(self, package, step, reason, revision=None, version=None, *, immediate=False):
         """Count a failure; disable the rule after FAILURE_LIMIT in a row or when immediate."""
-        value = self.all()
-        rules = self._rules(value, package, step, revision)
-        for rule in rules:
-            failures = rule.get("failures", 0) + 1
-            rule.update(failures=failures, last_failure_at=time.time(), last_error=reason)
-            if immediate or failures >= FAILURE_LIMIT:
-                rule.update(active=False, invalidated_at=time.time(), reason=reason)
-                if version:
-                    rule["invalidated_version"] = version
-        if rules:
-            write_json(self.file, value)
+        with file_lock(self.root / ".rules.lock"):
+            value = self.all()
+            rules = self._rules(value, package, step, revision)
+            for rule in rules:
+                failures = rule.get("failures", 0) + 1
+                rule.update(failures=failures, last_failure_at=time.time(), last_error=reason)
+                if immediate or failures >= FAILURE_LIMIT:
+                    rule.update(active=False, invalidated_at=time.time(), reason=reason)
+                    if version:
+                        rule["invalidated_version"] = version
+            if rules:
+                write_json(self.file, value)
 
     def health(self):
         """Per-rule status for `geo-collect rules`; recipes are omitted."""

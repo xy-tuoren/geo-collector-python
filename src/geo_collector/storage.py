@@ -53,6 +53,47 @@ def event(file: Path, name: str, **details):
         print(json.dumps(value, ensure_ascii=False), file=sys.stderr, flush=True)
 
 
+@contextmanager
+def file_lock(path: Path):
+    """Cross-process exclusive blocking lock for shared JSON stores (rules/lessons)."""
+    lock_path = Path(path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    stream = lock_path.open("a+b")
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            while True:
+                try:
+                    stream.seek(0)
+                    msvcrt.locking(stream.fileno(), msvcrt.LK_LOCK, 1)
+                    break
+                except OSError as error:
+                    if error.errno not in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):
+                        raise
+                    time.sleep(0.05)
+        else:
+            import fcntl
+
+            fcntl.flock(stream, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                stream.seek(0)
+                msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(stream, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        finally:
+            stream.close()
+
+
 class DeviceLease:
     """One local collector per phone; a paused run releases the device."""
 
