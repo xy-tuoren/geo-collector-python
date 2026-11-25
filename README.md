@@ -29,7 +29,18 @@ uv run --locked --no-dev geo-collect run --entry xiaohe douyin \
   --question-index 1,5,12 --output captures/smoke
 ```
 
-`--question-index` 对应原文件行号，从 1 开始；不传则使用全部非空行。连接多台手机时指定 `--serial`。默认规则库为当前工作目录的 `.geo-collector/`，换目录执行请显式传 `--rule-dir /绝对路径/.geo-collector`。
+`--question-index` 对应原文件行号，从 1 开始；不传则使用全部非空行。连接多台手机时可用 `--serial` 指定单台，或使用 `--all-devices` / `--serials` 按题自动分片并行采集；如需实时监看手机画面，可加 `--screen`（首次自动下载并校验 `scrcpy`，默认只读投屏且复用同一 ADB，不影响 `uiautomator2`）：
+
+```bash
+geo-collect devices                                                # 列出已连接 ADB 设备
+geo-collect screen --all --window-width 360 --columns 3            # 网格平铺多机实时投屏
+geo-collect run --all-devices --screen --entry xiaohe douyin \
+  --questions-file captures/questions.txt                          # 多机并行分片采集 + 自动平铺投屏
+geo-collect resume /绝对路径/fleet_日期时间 --screen               # 多机断点续跑（已完成设备自动跳过）
+geo-collect verify /绝对路径/fleet_日期时间                        # 联合验收所有分片覆盖与产物完整性
+```
+
+默认规则库为当前工作目录的 `.geo-collector/`，换目录执行请显式传 `--rule-dir /绝对路径/.geo-collector`。
 
 头条通过 `--entry toutiao` 显式选择；不传 `--entry` 时仍只运行小荷 App 和抖音。头条支持“智能总结 → 查看更多／查看全文”和“小荷AI医生＋小程序标记”两种首屏入口，兼容旧搜索框及新版“搜索框，原题”语义节点：
 
@@ -279,7 +290,7 @@ geo-collect recover /绝对路径/batch_日期时间 \
 
 - 单进程 Python，直接使用 uiautomator2、ADB 原始 PNG、本地 RapidOCR 与图像匹配，没有 Node sidecar。
 - `platforms/` 中四个明确的入口模块；`douyin` 与 `toutiao` 复用首屏入口取证循环，`douyin-direct` 使用独立的新会话与直接提问流程。共用可学习的目标路径、页面角色和完整性采集器，没有通用工作流 DSL、自动源码改写或常驻推理循环。
-- 本机同一时间只运行一个采集进程，避免多个规则目录争抢手机。以后需要并行多机时再拆成每设备锁与事务规则库。
+- 单台设备同一时间只运行一个采集进程；连接多台手机时支持 `run --all-devices` / `--serials` 按题分片并行采集与 `screen --all` 多屏平铺投屏，共用规则库与经验库通过跨进程文件锁安全读写。
 - 仅支持正常竖屏。新版入口、中间页面或页面角色可以经 Agent 探索学习；如果新的内容形态超出当前正文/引用/药品检查器，仍需扩展检查器，不能声明任意改版均可修复。
 - 自愈可修复“如何定位和到达预期页面”，不会把未完成回答、不可验证接缝或缺失药品改成成功。
 
