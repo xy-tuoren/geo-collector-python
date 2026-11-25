@@ -17,7 +17,7 @@ Python 原生 Android 采集 CLI，支持小荷 AI 医生 APP、抖音搜索、�
 
 ## 安装与运行
 
-CLI、配套 `SKILL.md` 与按需加载的排障文档 `references/install.md` 打包在同一个 PyPI 包（`xiaohe-geo-collector`）内。最简上手方式是直接把开箱提示词发给本地 Agent，由 Agent 自动完成安装、托管 Skill 与手机自检；也可在终端执行 `uv tool install --python 3.11 --default-index https://pypi.tuna.tsinghua.edu.cn/simple xiaohe-geo-collector && geo-collect setup --agent codex`（`--agent` 支持 `codex`、`claude-code`、`cursor`、`antigravity`/`gemini`）。后续升级只需运行 `geo-collect upgrade --mirror tuna`（或让 Agent 执行），会自动升级 CLI 并同步刷新本机已安装的受管 Skill。重新打开数据工作目录中的 Agent 会话后，直接发问题让 Agent 采集。`geo-collect agent-guide` 仍可离线读取同一份说明。完整安装、开箱话术、PyPI OIDC 自动发版配置和 ZIP 安装见 [首次使用指南](INSTALL.md)。维护者可用 `uv run python scripts/release.py <版本号> --push` 触发 GitHub Actions 自动测试、发布 PyPI 与 GitHub Release，或本地执行 `uv build --no-sources` / `uv run python scripts/build_release.py` 构建产物。
+CLI、配套 `SKILL.md` 与按需加载的排障文档 `references/install.md` 打包在同一个 PyPI 包（`xiaohe-geo-collector`）内，**不限特定 Agent**——只要本地 Agent 能执行终端命令、读写文件并看截图即可直接驱动。最简上手方式是直接把通用开箱提示词发给任意本地 Agent，由当前 Agent 自行安装 CLI 并按自身规范配置 Skill/规则；也可在终端执行 `uv tool install --python 3.11 --default-index https://pypi.tuna.tsinghua.edu.cn/simple xiaohe-geo-collector`，再用 `geo-collect setup --dir <任意 Agent 的 skills 目录>` 安装配套 Skill（或使用内置快捷方式 `--agent codex|claude-code|cursor|antigravity`；不走 skills 目录的 Agent 直接运行 `geo-collect agent-guide` 读取同一份说明）。后续升级运行 `geo-collect upgrade --mirror tuna`（或让 Agent 执行）。完整安装、通用开箱话术、PyPI OIDC 自动发版配置和 ZIP 安装见 [首次使用指南](INSTALL.md)。维护者可用 `uv run python scripts/release.py <版本号> --push` 触发 GitHub Actions 自动测试、发布 PyPI 与 GitHub Release，或本地执行 `uv build --no-sources` / `uv run python scripts/build_release.py` 构建产物。
 
 在项目根目录运行。电脑需有 `uv` 和 ADB，手机需授权 USB 调试并解锁。批量题库为 UTF-8 文本，每行一题。
 

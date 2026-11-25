@@ -17,16 +17,23 @@ uv tool install --python 3.11 --default-index https://mirrors.aliyun.com/pypi/si
 uv tool install --python 3.11 xiaohe-geo-collector
 ```
 
-安装完成后，如需要把 Skill 托管到本机 Agent 以便后续随 `upgrade` 自动刷新：
+安装完成后，由当前 Agent 按自身规范配置 Skill（不限特定 Agent）：
 
 ```bash
+# 通用方式：安装到任意 Agent 的 skills 目录
+geo-collect setup --dir <当前 Agent 的 skills 目录>
+
+# 不走 skills 目录的 Agent：直接读取完整操作规范并按自身格式保存
+geo-collect agent-guide
+
+# 内置常用目录快捷方式（可选）
 geo-collect setup --agent codex        # ~/.agents/skills/geo-collector/
 geo-collect setup --agent claude-code  # ~/.claude/skills/geo-collector/
 geo-collect setup --agent cursor       # ~/.cursor/skills/geo-collector/
 geo-collect setup --agent antigravity  # ~/.gemini/skills/geo-collector/（也支持别名 gemini）
 ```
 
-升级到最新版（自动刷新所有受管 Skill，不影响 `.geo-collector/` 与 `captures/`）：
+升级到最新版（自动刷新常用目录中的受管 Skill，不影响 `.geo-collector/` 与 `captures/`；使用 `--dir` 的自定义目录可重跑 `geo-collect setup --dir <原目录>`）：
 
 ```bash
 geo-collect upgrade --mirror tuna      # 国内镜像

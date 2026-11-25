@@ -226,3 +226,30 @@ def test_upgrade_dry_run_and_mirror_and_version_validation(workspace, monkeypatc
     assert calls[1] == ["/venv/bin/uv", "tool", "dir", "--bin"]
     assert calls[2] == [str(tool_geo), "setup", "--installed"]
     assert calls[3] == [str(tool_geo), "--version"]
+
+
+def test_setup_custom_dir_installs_and_updates_without_agent_allowlist(workspace, monkeypatch):
+    home, _ = workspace
+    custom_root = home / "any-agent" / "skills"
+    first = cli.execute(cli.parser().parse_args(["setup", "--dir", str(custom_root)]))
+    skill = custom_root / "geo-collector" / "SKILL.md"
+    ref = custom_root / "geo-collector" / "references" / "install.md"
+    assert first["status"] == "installed" and first["agent"] == "custom" and first["scope"] == "custom"
+    assert first["skill_path"] == str(skill)
+    assert skill.read_text(encoding="utf-8") == setup.agent_guide()
+    assert ref.read_text(encoding="utf-8") == setup.install_reference()
+
+    # Passing the geo-collector folder directly does not nest geo-collector/geo-collector.
+    direct = cli.execute(cli.parser().parse_args(["setup", "--dir", str(custom_root / "geo-collector")]))
+    assert direct["status"] == "unchanged" and direct["skill_path"] == str(skill)
+    assert not (custom_root / "geo-collector" / "geo-collector").exists()
+
+    # Managed update works and user edits remain protected.
+    monkeypatch.setattr(setup, "agent_guide", lambda: "updated custom guide\n")
+    updated = setup.install_skill(target_dir=custom_root)
+    assert updated["status"] == "updated" and skill.read_text(encoding="utf-8") == "updated custom guide\n"
+    skill.write_text("user customized", encoding="utf-8")
+    with pytest.raises(ValueError, match="已保留原文件"):
+        setup.install_skill(target_dir=custom_root)
+    with pytest.raises(ValueError, match="只能提供一个"):
+        setup.install_skill("codex", target_dir=custom_root)

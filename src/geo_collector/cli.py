@@ -152,11 +152,12 @@ def parser():
     commands.add_parser("goals", help="输出内置采集目标、不可降低的验收条件和Agent接管协议")
     commands.add_parser("entries", help="列出采集入口及实际进入方式；不连接手机")
     commands.add_parser("agent-guide", help="读取随包分发的 Agent 采集和异常接管说明；不连接手机")
-    setup = commands.add_parser("setup", help="为所选本地 Agent 安装或刷新随包分发的采集 Skill；不连接手机")
+    setup = commands.add_parser("setup", help="安装或刷新随包分发的采集 Skill（支持任意 --dir 目录或常用 --agent 快捷方式）；不连接手机")
     setup_target = setup.add_mutually_exclusive_group(required=True)
-    setup_target.add_argument("--agent", choices=list(SUPPORTED_AGENTS))
-    setup_target.add_argument("--installed", action="store_true", help="刷新本机所有由 geo-collector 托管的已安装 Skill")
-    setup.add_argument("--scope", choices=["user", "project"], default="user", help="默认当前用户；project 仅安装到当前工作目录")
+    setup_target.add_argument("--dir", dest="target_dir", type=Path, help="安装到任意 Agent 的 skills 目录（自动创建 geo-collector 子目录，不限特定 Agent）")
+    setup_target.add_argument("--agent", choices=list(SUPPORTED_AGENTS), help="常用 Agent 目录快捷方式")
+    setup_target.add_argument("--installed", action="store_true", help="刷新常用目录中所有由 geo-collector 托管的已安装 Skill")
+    setup.add_argument("--scope", choices=["user", "project"], default="user", help="仅配合 --agent/--installed 使用：默认当前用户；project 仅安装到当前工作目录")
     setup.add_argument("--dry-run", action="store_true", help="只检查目标并返回安装位置，不写文件")
     upgrade = commands.add_parser("upgrade", help="一键通过 uv 更新 CLI 并同步刷新已安装的 Agent Skill；不连接手机")
     upgrade.add_argument("--version", dest="target_version", help="升级到指定版本，如 0.1.3（默认最新）")
@@ -446,7 +447,7 @@ def execute(args):
         from .setup import install_skill, refresh_installed_skills
         if args.installed:
             return refresh_installed_skills(scope=args.scope, dry_run=args.dry_run)
-        return install_skill(args.agent, scope=args.scope, dry_run=args.dry_run)
+        return install_skill(args.agent, target_dir=args.target_dir, scope=args.scope, dry_run=args.dry_run)
     if args.command == "upgrade":
         from .setup import upgrade_cli
         return upgrade_cli(target_version=args.target_version, index_url=args.index_url, mirror=args.mirror,

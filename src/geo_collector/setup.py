@@ -83,9 +83,16 @@ def _skill_dir(agent: str, scope: str) -> Path:
     return config.absolute() / "skills" / "geo-collector"
 
 
-def _check_path_safety(directory: Path, relpaths: tuple[str, ...]) -> None:
-    config = directory.parent.parent
-    check_paths = [config, directory.parent, directory, directory / RECEIPT]
+def _custom_skill_dir(target_dir: str | Path) -> Path:
+    path = Path(target_dir).expanduser().absolute()
+    return path if path.name == "geo-collector" else path / "geo-collector"
+
+
+def _check_path_safety(directory: Path, relpaths: tuple[str, ...], *, check_ancestors: bool = True) -> None:
+    check_paths = [directory, directory / RECEIPT]
+    if check_ancestors:
+        config = directory.parent.parent
+        check_paths = [config, directory.parent, *check_paths]
     for rel in relpaths:
         target = directory / rel
         parent = target.parent
@@ -97,6 +104,8 @@ def _check_path_safety(directory: Path, relpaths: tuple[str, ...]) -> None:
         raise ValueError(f"Skill 路径包含符号链接，请通过原管理工具更新：{directory}")
     if directory.exists() and not directory.is_dir():
         raise ValueError(f"Skill 安装路径不是目录：{directory}")
+    if directory.parent.exists() and not directory.parent.is_dir():
+        raise ValueError(f"Skill 父路径不是目录：{directory.parent}")
     for rel in relpaths:
         target = directory / rel
         parent = target.parent
@@ -108,15 +117,26 @@ def _check_path_safety(directory: Path, relpaths: tuple[str, ...]) -> None:
             raise ValueError(f"Skill 目标路径是目录而非文件：{target}")
 
 
-def install_skill(agent: str, *, scope: str = "user", dry_run: bool = False) -> dict:
-    canonical = _normalize_agent(agent)
-    if canonical not in AGENT_DIRS or scope not in {"user", "project"}:
-        raise ValueError("请选择支持的 Agent 和 user/project 安装范围")
-    directory = _skill_dir(canonical, scope)
+def install_skill(agent: str | None = None, *, target_dir: str | Path | None = None,
+                  scope: str = "user", dry_run: bool = False) -> dict:
+    if target_dir is not None:
+        if agent is not None:
+            raise ValueError("--agent 与 --dir 只能提供一个")
+        canonical = "custom"
+        effective_scope = "custom"
+        directory = _custom_skill_dir(target_dir)
+    else:
+        if not agent:
+            raise ValueError("请指定 --dir <skills目录> 或 --agent <常用快捷名称>")
+        canonical = _normalize_agent(agent)
+        if canonical not in AGENT_DIRS or scope not in {"user", "project"}:
+            raise ValueError("请选择支持的快捷 Agent 和 user/project 安装范围，或使用 --dir 指定任意目录")
+        effective_scope = scope
+        directory = _skill_dir(canonical, scope)
     skill = directory / "SKILL.md"
     receipt = directory / RECEIPT
     bundle = _bundled_skill_files()
-    _check_path_safety(directory, tuple(bundle))
+    _check_path_safety(directory, tuple(bundle), check_ancestors=target_dir is None)
 
     saved = None
     if receipt.exists():
@@ -171,7 +191,7 @@ def install_skill(agent: str, *, scope: str = "user", dry_run: bool = False) -> 
 
     result = {
         "status": "preview" if dry_run else action,
-        "action": action, "agent": canonical, "scope": scope, "skill_path": str(skill),
+        "action": action, "agent": canonical, "scope": effective_scope, "skill_path": str(skill),
         "files": [str(directory / rel) for rel in bundle],
         "version": package_version(),
         "next": "在数据工作目录重新打开 Agent 会话，使用 geo-collector Skill 采集你的问题。",
