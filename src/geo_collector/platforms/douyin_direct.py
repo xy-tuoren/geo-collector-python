@@ -937,7 +937,77 @@ def _prepare_draft(engine, task):
         engine.device.input_text(task["text"], expected_package=PACKAGE, clear=True)
 
 
+def _divider_covered_by_composer(current, baseline) -> bool:
+    """True when focusing/typing expanded the composer upward over a verified blank-tail divider."""
+    if session_boundary(current) is not None:
+        return False
+    if isinstance(baseline, Path):
+        try:
+            baseline = load_observation(baseline)
+        except (OSError, ValueError):
+            return False
+    if (not baseline or session_evidence(baseline) != "blank" or not chat_state(current) or dialog_target(current)
+            or (current.package, current.activity, current.logical_size, current.physical_size) !=
+               (baseline.package, baseline.activity, baseline.logical_size, baseline.physical_size)):
+        return False
+    try:
+        cur_view, base_view = answer_viewport(current), answer_viewport(baseline)
+    except (CaptureError, DeviceError):
+        return False
+    if cur_view[:3] != base_view[:3] or cur_view[3] >= base_view[3]:
+        return False
+    source = session_boundary(baseline)["marker"]
+    marker = map_bounds(source, baseline.logical_size, baseline.physical_size)
+    return marker[3] > cur_view[3]
+
+
+def _reveal_covered_divider(engine, task, baseline):
+    """Scroll the chat viewport up when an expanded composer hides the already-verified divider."""
+    for attempt in range(1, 3):
+        current = _require_chat(engine)
+        chat = chat_state(current)
+        field = chat["input"] if chat else None
+        if not field or field.get("text") != task["text"]:
+            return
+        if draft_session_verdict(current, task["text"], baseline)[0]:
+            return
+        if not _divider_covered_by_composer(current, baseline):
+            return
+        cur_view = answer_viewport(current)
+        logical = map_bounds(cur_view, current.physical_size, current.logical_size)
+        width = current.logical_size[0]
+        span = logical[3] - logical[1]
+        engine.device.swipe(
+            (width / 2, logical[1] + span * 0.65),
+            (width / 2, logical[1] + span * 0.25),
+            0.35,
+            expected_package=PACKAGE,
+        )
+        time.sleep(0.35)
+        after = _require_chat(engine)
+        after_field = chat_state(after)["input"]
+        if after_field and after_field.get("text") == task["text"] and not after_field.get("focused"):
+            engine.perform(
+                ID + ".focus_input",
+                "重新聚焦小荷小程序唯一的问题输入框",
+                PACKAGE,
+                lambda o: bool(chat_state(o) and chat_state(o)["input"] and chat_state(o)["input"].get("focused")),
+                defaults=focus_defaults(),
+                hints=INPUT_HINTS,
+            )
+            after = _require_chat(engine)
+        engine.log(
+            "douyin_direct_draft_divider_revealed",
+            attempt=attempt,
+            divider_visible=session_boundary(after) is not None,
+        )
+        if session_boundary(after) is not None:
+            return
+
+
 def _verified_draft(engine, task):
+    baseline = engine.run_dir / "调试产物" / ID / f"{task['index']:03d}" / "new-session"
+    _reveal_covered_divider(engine, task, baseline)
     first = _require_chat(engine)
     field = chat_state(first)["input"]
     if not field or not field.get("focused") or field.get("text") != task["text"]:
@@ -954,7 +1024,6 @@ def _verified_draft(engine, task):
         # stable button; it does not overwrite any unrelated draft.
         engine._request(ID + ".send_control", "确认当前原题的唯一发送按钮；不能点击或重复发送", current, SEND_HINTS,
                         "发送按钮或输入布局尚未可靠识别", uncertain_send=True)
-    baseline = engine.run_dir / "调试产物" / ID / f"{task['index']:03d}" / "new-session"
     if (draft_session_verdict(first, task["text"], baseline)[0]
             and draft_session_verdict(current, task["text"], baseline)[0]):
         engine.resolve_capture_request(BEFORE_SEND)

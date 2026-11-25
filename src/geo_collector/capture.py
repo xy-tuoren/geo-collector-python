@@ -766,11 +766,14 @@ def _product_image_boxes(observation, viewport, *, canvas_cards=False):
             names = [line for line in labels if 0 <= box[1] - line["bounds"][3] <= ph * .06
                      and len(normalized(_label(line))) >= 2]
             for name in names:
-                inside = sorted([line for line in labels if box[0] <= line["bounds"][0] < line["bounds"][2] <= box[2]
+                inside = sorted([line for line in observation.texts if line.get("confidence", 0) >= .50
+                                 and box[0] <= line["bounds"][0] < line["bounds"][2] <= box[2]
                                  and box[1] + bh * .35 <= line["bounds"][1] < line["bounds"][3] <= box[1] + bh * .85],
                                 key=lambda line: (line["bounds"][1], line["bounds"][0]))
                 repeats, expected = [], normalized(_label(name))
                 for index, line in enumerate(inside):
+                    if line.get("confidence", 0) < .78:
+                        continue
                     combined, previous = "", None
                     for part in inside[index:]:
                         if previous and (part["bounds"][1] - previous["bounds"][3] > ph * .016

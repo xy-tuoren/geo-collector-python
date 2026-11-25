@@ -569,3 +569,62 @@ def test_foreground_miniapp_reuses_activity_without_launcher_reset_and_waits_for
     workflow.run_questions(delayed, RuleStore(tmp_path / "rules2"), tmp_path / "run2", run_delayed)
     assert run_delayed["status"] == "complete"
     assert delayed.results_polls == 2
+
+
+def test_expanded_composer_covering_divider_scrolls_to_reveal_before_send(tmp_path, monkeypatch):
+    monkeypatch.setattr(workflow, "AnswerCapture", Capture)
+    monkeypatch.setattr("geo_collector.recovery.time.sleep", lambda _: None)
+    monkeypatch.setattr("geo_collector.platforms.douyin_direct.time.sleep", lambda _: None)
+
+    class TallComposerPhone(DirectPhone):
+        def __init__(self):
+            super().__init__(stage="chat")
+            self.revealed = False
+            self.reveal_swipes = 0
+
+        def observe(self, ocr=False):
+            obs = super().observe(ocr=ocr)
+            if self.stage != "clean":
+                return obs
+            # In collapsed new-session state, divider sits near the bottom of the viewport (y=1240..1280).
+            # Once draft text is typed, composer expands upward (y=1200..1530) and hides the divider until scrolled!
+            if not self.draft:
+                for t in obs.texts:
+                    if t["text"] == "已开始新会话":
+                        t["bounds"] = (260, 1240, 460, 1280)
+                return obs
+            # Expanded composer (y=1200..1530) moves input/send upward and crops viewport bottom below 1200.
+            for n in obs.nodes:
+                if n.get("class_name") == "android.widget.ScrollView":
+                    n["bounds"] = (0, 170, 720, 1180)
+                elif n.get("class_name") == "android.widget.EditText":
+                    n["bounds"] = (134, 1240, 586, 1340)
+                elif n.get("text") == "发送":
+                    n["bounds"] = (620, 1260, 690, 1330)
+                elif n["bounds"] == (20, 1400, 700, 1530):
+                    n["bounds"] = (20, 1200, 700, 1530)
+            if not self.revealed:
+                obs.texts = [t for t in obs.texts if t["text"] != "已开始新会话"]
+            else:
+                for t in obs.texts:
+                    if t["text"] == "已开始新会话":
+                        t["bounds"] = (260, 960, 460, 1000)
+            return obs
+
+        def swipe(self, start, end, duration, expected_package):
+            assert expected_package == direct.PACKAGE
+            self.calls.append(("swipe", start, end))
+            if self.stage == "clean" and self.draft and end[1] < start[1]:
+                self.reveal_swipes += 1
+                self.revealed = True
+                # Simulate losing focus on swipe to verify re-focus without overwriting draft.
+                self.focused = False
+
+    phone = TallComposerPhone()
+    run = state(direct.ID)
+    workflow.run_questions(phone, RuleStore(tmp_path / "rules"), tmp_path / "run", run)
+    assert run["status"] == "complete"
+    assert phone.reveal_swipes == 1
+    assert len([c for c in phone.calls if c[0] == "send"]) == 1
+    proof = direct.submission_evidence(run["tasks"][0], tmp_path / "run")
+    assert proof is not None and proof["session_evidence"] == "blank" and proof["draft_evidence"] == "blank"

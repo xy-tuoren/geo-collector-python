@@ -264,3 +264,43 @@ def test_direct_capture_never_scrolls_past_new_session_to_old_same_question(tmp_
     with pytest.raises(CaptureError, match="不能继续进入旧会话"):
         direct_question_bubble(item, phone.question, capture.viewport)
     assert not phone.swipes
+
+
+def test_product_card_matches_wrapped_single_char_ocr_continuation():
+    from PIL import ImageDraw
+    from geo_collector.capture import drawer_state, product_image_evidence
+    from geo_collector.device import Observation
+
+    image = Image.new("RGB", (1080, 2400), "white")
+    draw = ImageDraw.Draw(image)
+    # Draw colorful medicine box texture inside the photo region of card (211, 727, 618, 1108)
+    for y in range(740, 1090, 12):
+        draw.rectangle((240, y, 590, y + 6), fill=(20, 160, 120))
+    png_bytes = _png(image)
+    nodes = [
+        {"text": "", "description": "", "resource_id": "", "class_name": "androidx.recyclerview.widget.RecyclerView",
+         "bounds": (0, 614, 1080, 2356), "clickable": False, "scrollable": True, "package": "com.ss.android.ugc.aweme",
+         "focused": False, "enabled": True},
+        {"text": "", "description": "", "resource_id": "", "class_name": "android.widget.HorizontalScrollView",
+         "bounds": (33, 727, 1047, 1508), "clickable": False, "scrollable": True, "package": "com.ss.android.ugc.aweme",
+         "focused": False, "enabled": True},
+        {"text": "", "description": "", "resource_id": "", "class_name": "android.view.ViewGroup",
+         "bounds": (211, 727, 618, 1508), "clickable": False, "scrollable": False, "package": "com.ss.android.ugc.aweme",
+         "focused": False, "enabled": True},
+    ]
+    texts = [
+        {"text": "参考药品", "confidence": 0.99, "bounds": (441, 511, 637, 573)},
+        {"text": "帕夫林·白芍总苷胶囊", "confidence": 0.998, "bounds": (32, 641, 425, 686)},
+        {"text": "帕夫林·白芍总苷胶", "confidence": 0.999, "bounds": (237, 1117, 591, 1163)},
+        # Isolated wrapped CJK tail character commonly gets ~0.73-0.75 confidence in RapidOCR.
+        {"text": "囊", "confidence": 0.733, "bounds": (233, 1170, 289, 1227)},
+        {"text": "查看说明书", "confidence": 0.99, "bounds": (335, 1408, 495, 1450)},
+    ]
+    obs = Observation(png_bytes, "<hierarchy/>", "com.ss.android.ugc.aweme",
+                      "com.tt.miniapphost.placeholder.MiniAppHostActivity0",
+                      (1080, 2400), (1080, 2400), "40.4.0", nodes, texts)
+    ds = drawer_state(obs)
+    assert ds is not None
+    evidence = product_image_evidence(obs, ds["viewport"])
+    assert evidence["ready"] is True
+    assert evidence["regions"] == [(211, 727, 618, 1108)]
