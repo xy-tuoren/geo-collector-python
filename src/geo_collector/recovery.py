@@ -337,7 +337,14 @@ class StepEngine:
 
     def commit_flows(self, result=None):
         from types import SimpleNamespace
+        outcome = (result or {}).get("outcome")
         for step, item in self.state.pop("flow_candidates", {}).items():
+            if outcome == "entry_not_found" and (
+                step.startswith(("capture.", "products.", "citation."))
+                or step.endswith(".open_xiaohe")
+                or step == "perception.answer_page"
+            ):
+                continue
             if step.startswith("perception.") and not item.get("used"):
                 continue
             if step == "perception.session_welcome" and (result or {}).get("direct_submission", {}).get("session_evidence") != "welcome":
@@ -359,7 +366,7 @@ class StepEngine:
                 value = read_json(Path(item["request"]))
                 value.update(status="verified", finished_at=time.time())
                 write_json(Path(item["request"]), value)
-            self.log("flow_rule_promoted", step=step, capture_complete=True)
+            self.log("flow_rule_promoted", step=step, capture_complete=outcome != "entry_not_found")
         pending_lessons = self.state.pop("lesson_candidates", [])
         recalled_lessons = self.state.pop("recalled_lessons", [])
         if pending_lessons or recalled_lessons:

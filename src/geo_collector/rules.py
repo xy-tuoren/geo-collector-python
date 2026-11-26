@@ -223,6 +223,30 @@ def _match_template(template_image: Image.Image, target: dict, observation) -> t
     return (px * logical[0] / physical[0], py * logical[1] / physical[1])
 
 
+def _collapse_nested_boxes(boxes, size):
+    """Collapse parent-child duplicate wrappers of one single button into its innermost box."""
+    unique = list({tuple(b): b for b in boxes if len(b) == 4 and b[2] > b[0] and b[3] > b[1]}.values())
+    if len(unique) <= 1 or len(size) != 2 or not all(size):
+        return unique
+    ordered = sorted(unique, key=lambda b: (b[2] - b[0]) * (b[3] - b[1]))
+    inner, outer = ordered[0], ordered[-1]
+    sw, sh = float(size[0]), float(size[1])
+    ow, oh = outer[2] - outer[0], outer[3] - outer[1]
+    iw, ih = inner[2] - inner[0], inner[3] - inner[1]
+    if ow * oh > sw * sh * .15 or oh > sh * .25:
+        return unique
+    if iw < ow * .35 or ih < oh * .35:
+        return unique
+    icx, icy = center(inner)
+    ocx, ocy = center(outer)
+    if abs(icx - ocx) > ow * .25 or abs(icy - ocy) > oh * .25:
+        return unique
+    if all(outer[0] <= b[0] <= inner[0] and outer[1] <= b[1] <= inner[1]
+           and inner[2] <= b[2] <= outer[2] and inner[3] <= b[3] <= outer[3] for b in ordered):
+        return [inner]
+    return unique
+
+
 def locate(target, observation, assets: Path):
     kind = target["kind"]
     region = target.get("region", [0, 0, 1, 1])
@@ -245,7 +269,10 @@ def locate(target, observation, assets: Path):
         if not file.is_relative_to(assets.resolve()) or file.suffix != ".png":
             raise LocateError("模板必须在本地规则目录内")
         return _match_template(Image.open(file).convert("RGB"), target, observation)
-    unique = list({tuple(b): b for b in boxes if b[2] > b[0] and b[3] > b[1]}.values())
+    if kind == "node":
+        unique = _collapse_nested_boxes(boxes, logical)
+    else:
+        unique = list({tuple(b): b for b in boxes if b[2] > b[0] and b[3] > b[1]}.values())
     if len(unique) != 1:
         raise LocateError(f"定位要求唯一目标，实际匹配 {len(unique)} 个")
     box = unique[0]
@@ -268,19 +295,27 @@ def generalize_region(target: dict, observation, original_bounds=None) -> dict:
     nodes = get("nodes", ())
     texts = get("texts", ())
     pkg = get("package", "")
-    expected = {tuple(original_bounds)} if original_bounds is not None else None
+    expected = tuple(original_bounds) if original_bounds is not None else None
 
     def unique_in_band(band) -> bool:
         if kind == "node":
-            boxes = {tuple(n["bounds"]) for n in nodes
-                     if n.get(target["attr"]) == target.get("value")
-                     and len(n.get("bounds", ())) == 4 and n["bounds"][2] > n["bounds"][0] and n["bounds"][3] > n["bounds"][1]
-                     and in_region(n["bounds"], size, band)}
-            scoped = {tuple(n["bounds"]) for n in nodes
-                      if n.get(target["attr"]) == target.get("value") and n.get("package", "") in ("", None, pkg)
-                      and len(n.get("bounds", ())) == 4 and n["bounds"][2] > n["bounds"][0] and n["bounds"][3] > n["bounds"][1]
-                      and in_region(n["bounds"], size, band)}
-            return len(boxes) == 1 and boxes == scoped and (expected is None or boxes == expected)
+            raw = [n["bounds"] for n in nodes
+                   if n.get(target["attr"]) == target.get("value")
+                   and len(n.get("bounds", ())) == 4 and n["bounds"][2] > n["bounds"][0] and n["bounds"][3] > n["bounds"][1]
+                   and in_region(n["bounds"], size, band)]
+            raw_scoped = [n["bounds"] for n in nodes
+                          if n.get(target["attr"]) == target.get("value") and n.get("package", "") in ("", None, pkg)
+                          and len(n.get("bounds", ())) == 4 and n["bounds"][2] > n["bounds"][0] and n["bounds"][3] > n["bounds"][1]
+                          and in_region(n["bounds"], size, band)]
+            boxes = _collapse_nested_boxes(raw, size)
+            scoped = _collapse_nested_boxes(raw_scoped, size)
+            if len(boxes) != 1 or len(scoped) != 1 or tuple(boxes[0]) != tuple(scoped[0]):
+                return False
+            if expected is None:
+                return True
+            matched = tuple(boxes[0])
+            return matched == expected or (expected[0] <= matched[0] and expected[1] <= matched[1]
+                                           and matched[2] <= expected[2] and matched[3] <= expected[3])
         boxes75 = {tuple(l["bounds"]) for l in texts
                    if l.get("confidence", 0) >= .75 and re.search(target["pattern"], l.get("text", ""))
                    and len(l.get("bounds", ())) == 4 and l["bounds"][2] > l["bounds"][0] and l["bounds"][3] > l["bounds"][1]
@@ -289,7 +324,7 @@ def generalize_region(target: dict, observation, original_bounds=None) -> dict:
                    if l.get("confidence", 0) >= .78 and re.search(target["pattern"], l.get("text", ""))
                    and len(l.get("bounds", ())) == 4 and l["bounds"][2] > l["bounds"][0] and l["bounds"][3] > l["bounds"][1]
                    and in_region(l["bounds"], size, band)}
-        return len(boxes75) == 1 and boxes75 == boxes78 and (expected is None or boxes75 == expected)
+        return len(boxes75) == 1 and boxes75 == boxes78 and (expected is None or boxes75 == {expected})
 
     if kind == "node" and target.get("attr") == "resource_id" and not is_obfuscated_id(target.get("value")):
         if unique_in_band([0, 0, 1, 1]):
@@ -351,7 +386,7 @@ def infer_target(observation, physical_point, assets: Path | None, hints=(), *, 
                 continue
             if attr == "description" and (value not in UI_LABELS or any(re.search(hint, value or "") for hint in hints)):
                 continue
-            if value and len(value) < 100 and sum(n.get(attr) == value for n in observation.nodes) == 1:
+            if value and len(value) < 100 and len(_collapse_nested_boxes([n["bounds"] for n in observation.nodes if n.get(attr) == value], (lw, lh))) == 1:
                 b = node["bounds"]
                 if (b[2] - b[0]) <= lw * .65 and (b[3] - b[1]) <= lh * .15 and (b[2] - b[0]) * (b[3] - b[1]) < lw * lh * .08:
                     return {"kind": "node", "attr": attr, "value": value, "offset": [(x - b[0]) / max(1, b[2] - b[0]), (y - b[1]) / max(1, b[3] - b[1])]}
@@ -366,7 +401,7 @@ def infer_target(observation, physical_point, assets: Path | None, hints=(), *, 
         value = node.get("text", "")
         # Only known UI controls are stable labels; questions and counts are data.
         if value in UI_LABELS:
-            if sum(n.get("text") == value for n in observation.nodes) == 1:
+            if len(_collapse_nested_boxes([n["bounds"] for n in observation.nodes if n.get("text") == value], (lw, lh))) == 1:
                 b = node["bounds"]
                 if (b[2] - b[0]) * (b[3] - b[1]) < lw * lh * .15:
                     return {"kind": "node", "attr": "text", "value": value, "offset": [(x-b[0])/max(1, b[2]-b[0]), (y-b[1])/max(1, b[3]-b[1])]}

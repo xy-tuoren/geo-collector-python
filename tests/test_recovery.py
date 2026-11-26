@@ -582,3 +582,40 @@ def test_commit_flows_drops_product_entry_when_drawer_was_not_used(tmp_path):
     }
     machine.commit_flows({"products": {"present": True, "mode": "inline"}})
     assert machine.store.get(PACKAGE, "perception.products_entry") is None
+
+
+def test_commit_flows_on_entry_not_found_promotes_pre_entry_nav_only(tmp_path):
+    from geo_collector.recovery import page_guard
+
+    machine = engine(tmp_path)
+    scene = observation()
+    guard = page_guard(scene)
+    after = page_guard(observation(ready=True))
+    ctx = machine._context(scene)
+    machine.state["flow_candidates"] = {
+        "douyin.open_search": {
+            "recipe": {"route": [{"action": {"type": "tap", "target": {"kind": "node", "attr": "description", "value": "搜索"}},
+                                  "before": guard, "after": after}]},
+            "context": ctx,
+        },
+        "douyin.open_xiaohe": {
+            "recipe": {"route": [{"action": {"type": "tap", "target": {"kind": "node", "attr": "text", "value": "查看全文"}},
+                                  "before": guard, "after": after}]},
+            "context": ctx,
+        },
+        "perception.answer_page": {
+            "recipe": {"perception": {"answer_page": {"kind": "node", "attr": "text", "value": "小荷AI医生"}}},
+            "context": ctx,
+            "used": True,
+        },
+        "perception.question": {
+            "recipe": {"perception": {"question": {"kind": "node", "attr": "resource_id", "value": "example:id/q"}}},
+            "context": ctx,
+            "used": True,
+        },
+    }
+    machine.commit_flows({"outcome": "entry_not_found", "status": "complete"})
+    assert machine.store.get(PACKAGE, "douyin.open_search") is not None
+    assert machine.store.get(PACKAGE, "douyin.open_xiaohe") is None
+    assert machine.store.get(PACKAGE, "perception.answer_page") is None
+    assert machine.store.get(PACKAGE, "perception.question") is None

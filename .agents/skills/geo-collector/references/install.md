@@ -7,14 +7,14 @@
 不要猜测私有仓库地址，也不要安装名称相近的非官方包。统一通过 `uv` 安装 PyPI 官方包 `xiaohe-geo-collector`（Python 3.11）：
 
 ```bash
-# 国内网络推荐（清华镜像）
-uv tool install --python 3.11 --default-index https://pypi.tuna.tsinghua.edu.cn/simple xiaohe-geo-collector
+# 国内网络推荐（清华镜像；--force 可自动覆盖早期旧包名冲突）
+uv tool install --force --python 3.11 --default-index https://pypi.tuna.tsinghua.edu.cn/simple xiaohe-geo-collector
 
 # 备用国内镜像（阿里云）
-uv tool install --python 3.11 --default-index https://mirrors.aliyun.com/pypi/simple xiaohe-geo-collector
+uv tool install --force --python 3.11 --default-index https://mirrors.aliyun.com/pypi/simple xiaohe-geo-collector
 
 # 国际网络（官方 PyPI）
-uv tool install --python 3.11 xiaohe-geo-collector
+uv tool install --force --python 3.11 xiaohe-geo-collector
 ```
 
 安装完成后，由当前 Agent 按自身规范配置 Skill（不限特定 Agent）：

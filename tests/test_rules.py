@@ -156,3 +156,61 @@ def test_obfuscated_id_and_full_width_container_fall_back_to_unique_visual_templ
     disambiguated = generalize_region({"kind": "ocr", "pattern": "^查看全文$", "region": [.07, .24, .25, .28]},
                                       obs_dict, (80, 600, 260, 650))
     assert disambiguated["region"][3] < .58
+
+
+def test_nested_duplicate_button_wrappers_collapse_while_distinct_nodes_stay_ambiguous(tmp_path):
+    from geo_collector.rules import generalize_region
+
+    base = observation((1080, 2400), (1080, 2400), text="")
+    # Real Douyin 40.4.0 top-right Search button: clickable outer wrapper + inner icon node both have description="搜索".
+    nested_scene = Observation(
+        base.png, base.xml, "com.ss.android.ugc.aweme", "com.ss.android.ugc.aweme.splash.SplashActivity",
+        (1080, 2400), (1080, 2400), "40.4.0",
+        nodes=[
+            {"package": "com.ss.android.ugc.aweme", "text": "", "description": "",
+             "resource_id": "com.ss.android.ugc.aweme:id/2ss", "class_name": "android.widget.ImageView",
+             "bounds": [31, 108, 119, 196], "clickable": False},
+            {"package": "com.ss.android.ugc.aweme", "text": "", "description": "搜索",
+             "resource_id": "", "class_name": "android.widget.Button",
+             "bounds": [935, 92, 1078, 213], "clickable": True},
+            {"package": "com.ss.android.ugc.aweme", "text": "", "description": "搜索",
+             "resource_id": "com.ss.android.ugc.aweme:id/2ss", "class_name": "android.widget.Button",
+             "bounds": [957, 108, 1045, 196], "clickable": False},
+        ],
+        texts=[],
+    )
+    target = {"kind": "node", "attr": "description", "value": "搜索"}
+    assert locate(target, nested_scene, tmp_path) == pytest.approx((1001.0, 152.0))
+    widened = generalize_region({**target, "region": [.86, .03, .99, .09]}, nested_scene, (935, 92, 1078, 213))
+    assert widened["region"] == [0, 0, 1, .22]
+    inferred = infer_target(nested_scene, (1004, 144), tmp_path, save_assets=False)
+    assert inferred["kind"] == "node" and inferred["attr"] == "description" and inferred["value"] == "搜索"
+
+    # Disjoint nodes sharing the same resource_id (top-left sidebar + top-right search) remain ambiguous.
+    with pytest.raises(LocateError, match="匹配 2"):
+        locate({"kind": "node", "attr": "resource_id", "value": "com.ss.android.ugc.aweme:id/2ss"}, nested_scene, tmp_path)
+
+    # A full-screen container wrapping a small button must NOT collapse.
+    huge_wrapper = Observation(
+        base.png, base.xml, "com.example.app", "Main", (1080, 2400), (1080, 2400), "1.0",
+        nodes=[
+            {"package": "com.example.app", "description": "搜索", "bounds": [0, 0, 1080, 2400]},
+            {"package": "com.example.app", "description": "搜索", "bounds": [957, 108, 1045, 196]},
+        ],
+        texts=[],
+    )
+    with pytest.raises(LocateError, match="匹配 2"):
+        locate(target, huge_wrapper, tmp_path)
+
+    # Two sibling buttons inside one container must NOT collapse.
+    siblings = Observation(
+        base.png, base.xml, "com.example.app", "Main", (1080, 2400), (1080, 2400), "1.0",
+        nodes=[
+            {"package": "com.example.app", "description": "搜索", "bounds": [800, 90, 1070, 210]},
+            {"package": "com.example.app", "description": "搜索", "bounds": [810, 100, 910, 200]},
+            {"package": "com.example.app", "description": "搜索", "bounds": [950, 100, 1050, 200]},
+        ],
+        texts=[],
+    )
+    with pytest.raises(LocateError, match="匹配 3"):
+        locate(target, siblings, tmp_path)

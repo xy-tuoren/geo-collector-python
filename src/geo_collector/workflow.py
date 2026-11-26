@@ -98,6 +98,7 @@ def _finish_entry_outcome(engine, task, debug, result):
                   status="complete", goal_contract_version=CONTRACT["version"])
     file = debug / "entry-not-found.json"
     write_json(file, result)
+    engine.commit_flows(result)
     task.update(status="complete", outcome=result["outcome"], result=str(file))
     engine.state.pop("entry_scan_resume", None)
     _phase(engine, task, "done")

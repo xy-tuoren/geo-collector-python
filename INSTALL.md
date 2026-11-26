@@ -4,7 +4,7 @@
 
 只要你的本地 Agent **能执行终端命令、读写文件和看截图**（例如 Claude Code、Codex、Cursor、Antigravity、Windsurf、OpenCode、Trae 或任意其他同类 Agent），无需拉源码、无需额外模型或 API Key，直接把下面这段话发给它即可，由当前 Agent 自行按自身规范完成安装、配置技能与手机自检：
 
-> 帮我安装并配置 PyPI 包 `xiaohe-geo-collector`（Python 3.11，国内请用清华镜像 `https://pypi.tuna.tsinghua.edu.cn/simple`；如缺少 `uv` 或 `adb` 请顺手帮我装好）。装好后按你自己支持的 Skill 或规则机制给我配好 `geo-collector`：如果你使用 skills 目录，直接运行 `geo-collect setup --dir <你自己的 skills 目录>`；否则运行 `geo-collect agent-guide` 读取完整说明并按你的规范保存（或创建一条规则在采集时调用 `geo-collect agent-guide`）。最后运行 `geo-collect doctor` 帮我检查手机连接。
+> 帮我用命令 `uv tool install --force --python 3.11 --default-index https://pypi.tuna.tsinghua.edu.cn/simple xiaohe-geo-collector` 安装 PyPI 包 `xiaohe-geo-collector`（若镜像暂未同步可去掉 `--default-index` 改走官方源；如缺少 `uv` 或 `adb` 请顺手帮我装好）。装好后按你自己支持的 Skill 或规则机制给我配好 `geo-collector`：如果你使用 skills 目录，直接运行 `geo-collect setup --dir <你自己的 skills 目录>`；否则运行 `geo-collect agent-guide` 读取完整说明并按你的规范保存（或创建一条规则在采集时调用 `geo-collect agent-guide`）。最后运行 `geo-collect doctor` 帮我检查手机连接。
 
 （如果更喜欢手动放文件，也可直接把 `.agents/skills/geo-collector` 文件夹放到对应 Agent 的 Skills 目录。）
 
@@ -17,11 +17,11 @@ CLI、配套 `SKILL.md` 与按需排障参考 `references/install.md` 打包在�
 `uv` 会自动准备 Python 3.11 和依赖；安装好 CLI 后，可用 `geo-collect setup --dir <任意 Agent 的 skills 目录>` 把随包 Skill 写入任意目录，或直接让 Agent 运行 `geo-collect agent-guide` 按自身规范配置：
 
 ```sh
-# 国内网络推荐加清华镜像（首次下载 onnxruntime/opencv 更快）
-uv tool install --python 3.11 --default-index https://pypi.tuna.tsinghua.edu.cn/simple xiaohe-geo-collector
+# 国内网络推荐加清华镜像（--force 可自动覆盖旧版包名残留，避免二进制冲突）
+uv tool install --force --python 3.11 --default-index https://pypi.tuna.tsinghua.edu.cn/simple xiaohe-geo-collector
 
 # 国际网络
-uv tool install --python 3.11 xiaohe-geo-collector
+uv tool install --force --python 3.11 xiaohe-geo-collector
 
 # 方式 A：安装 Skill 到任意 Agent 的 skills 目录（不限特定 Agent）
 geo-collect setup --dir <你的 Agent skills 目录>

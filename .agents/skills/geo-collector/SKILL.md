@@ -7,7 +7,7 @@ description: 安装、升级并使用 geo-collect CLI 从安卓手机采集小�
 
 先检查 `geo-collect --version`（从源码目录运行时使用 `uv run geo-collect`）。
 
-- **未安装时自动配置**：仅使用唯一官方 PyPI 包名 `xiaohe-geo-collector`（不要安装其他同名或非官方包）。先确认 `uv` 可用，再执行 `uv tool install --python 3.11 --default-index https://pypi.tuna.tsinghua.edu.cn/simple xiaohe-geo-collector`（国内镜像失败时改用官方源 `uv tool install --python 3.11 xiaohe-geo-collector`）。装完若命令不在 PATH，运行 `uv tool update-shell` 并用 `uv tool dir --bin` 定位入口。随后由当前 Agent 按自身规范配置技能（不限特定 Agent）：支持 skills 目录的可执行 `geo-collect setup --dir <当前 Agent 的 skills 目录>`（或使用常用快捷方式 `--agent codex|claude-code|cursor|antigravity`）；不走 skills 目录或由外部工具托管时，通过 `geo-collect agent-guide` 读取并核对当前版本最新规程。
+- **未安装时自动配置**：仅使用唯一官方 PyPI 包名 `xiaohe-geo-collector`（不要安装其他同名或非官方包）。先确认 `uv` 可用，再执行 `uv tool install --force --python 3.11 --default-index https://pypi.tuna.tsinghua.edu.cn/simple xiaohe-geo-collector`（国内镜像失败时改用官方源 `uv tool install --force --python 3.11 xiaohe-geo-collector`；`--force` 可避免早期旧包名二进制冲突）。装完若命令不在 PATH，运行 `uv tool update-shell` 并用 `uv tool dir --bin` 定位入口。随后由当前 Agent 按自身规范配置技能（不限特定 Agent）：支持 skills 目录的可执行 `geo-collect setup --dir <当前 Agent 的 skills 目录>`（或使用常用快捷方式 `--agent codex|claude-code|cursor|antigravity`）；不走 skills 目录或由外部工具托管时，通过 `geo-collect agent-guide` 读取并核对当前版本最新规程。
 - **版本升级**：用户要求更新或遇到旧版缺少命令时，执行 `geo-collect upgrade --mirror tuna`（国际网络用 `geo-collect upgrade`），一键升级 CLI 并自动刷新本机所有受管 Skill（不影响 `.geo-collector/` 规则和 `captures/` 数据）。
 - **安装或环境报错**：仅当 `uv`、`adb`、Windows VC++、Linux `libgl1`/USB 权限或手机授权报错时，按需读取同目录下的 [references/install.md](references/install.md)；平时采集无需读取。
 
